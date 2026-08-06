@@ -12,11 +12,6 @@
 # shellcheck disable=SC2034,SC2153
 set -Eeuo pipefail
 
-# ShellCheck cannot see cross-file use in a sourced library, so variables set
-# here and read elsewhere (and vice versa) look unused/unassigned to it. This
-# is the project's one narrowly-justified exception, per docs/operator-guide.md.
-# shellcheck disable=SC2034,SC2153
-
 SDB_VERSION="1.0.0"
 SDB_SELF=${0##*/}
 SDB_RUN_STARTED=$(date -u +%FT%TZ)
