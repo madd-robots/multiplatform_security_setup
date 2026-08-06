@@ -1,0 +1,14 @@
+platform=debian
+confidence=secondary
+source=Search summaries of wiki.debian.org/SourcesList and of the Debian 13 deb822
+source=migration; debian.org was denied by this build environment's egress policy.
+source=Release/EOL dates are primary (distro-info-data on the build host).
+source_url=blocked: https://wiki.debian.org/SourcesList
+retrieved=2026-08-06
+format=deb822
+target=sources.list.d/debian.sources
+official_hosts=deb.debian.org security.debian.org ftp.debian.org archive.debian.org
+keyring_model=Signed-By /usr/share/keyrings/debian-archive-keyring.gpg
+notes=CONFIDENCE IS SECONDARY. --repair-repositories refuses to activate this
+notes=template unless --allow-secondary-template is given. Verify the stanzas
+notes=against https://wiki.debian.org/SourcesList before you use it.

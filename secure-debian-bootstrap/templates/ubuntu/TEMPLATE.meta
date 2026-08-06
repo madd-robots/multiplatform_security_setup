@@ -1,0 +1,12 @@
+platform=ubuntu
+confidence=primary
+source=Shipped /etc/apt/sources.list.d/ubuntu.sources on Ubuntu 24.04.4 LTS (read-only from the build host) + Ubuntu Foundations deb822 spec
+source_url=https://discourse.ubuntu.com/t/spec-apt-deb822-sources-by-default/29333
+retrieved=2026-08-06
+format=deb822
+target=sources.list.d/ubuntu.sources
+official_hosts=archive.ubuntu.com security.ubuntu.com ports.ubuntu.com old-releases.ubuntu.com
+keyring_model=Signed-By /usr/share/keyrings/ubuntu-archive-keyring.gpg
+notes=Components are preserved from the system being repaired; the value below is
+notes=only the fallback when nothing can be recovered. -backports is included
+notes=only if it was already enabled. -proposed is never written.

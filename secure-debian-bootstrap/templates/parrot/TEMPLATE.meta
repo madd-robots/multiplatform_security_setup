@@ -1,0 +1,14 @@
+platform=parrot
+confidence=primary
+source=ParrotSec/parrot-core system_configs/apt/sources.list.d/parrot.list
+source_url=https://raw.githubusercontent.com/ParrotSec/parrot-core/master/system_configs/apt/sources.list.d/parrot.list
+retrieved=2026-08-06
+format=legacy
+target=sources.list.d/parrot.list
+official_hosts=deb.parrot.sh
+keyring_model=vendor keyring in trusted.gpg.d (parrot-archive-keyring); exact
+keyring_model=filename not verified by this build, so no Signed-By is written
+notes=The security entry deliberately uses the deb.parrot.sh/direct/ host:
+notes=upstream states security updates must not be served from mirrors.
+notes=Backports are written disabled by default (documented deviation);
+notes=set SDB_PARROT_ENABLE_BACKPORTS=1 to enable.

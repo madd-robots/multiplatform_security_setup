@@ -1,0 +1,5 @@
+# MX Linux repository.
+# CONFIDENCE: secondary - see templates/mx-linux/TEMPLATE.meta.
+deb @MX_MIRROR@/mx/repo/ @CODENAME@ main non-free
+#deb @MX_MIRROR@/mx/testrepo/ @CODENAME@ test
+#deb @MX_MIRROR@/mx/repo/ @CODENAME@ ahs
