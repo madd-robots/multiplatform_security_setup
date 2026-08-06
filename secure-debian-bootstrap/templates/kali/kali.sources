@@ -1,0 +1,9 @@
+# Kali Linux network repositories.
+# Verbatim structure from the official Kali documentation source, 2026-08-06.
+# Suite is substituted from the branch detected on this system so that
+# kali-last-snapshot installations are not silently moved to kali-rolling.
+Types: deb
+URIs: http://http.kali.org/kali/
+Suites: @KALI_SUITE@
+Components: main contrib non-free non-free-firmware
+Signed-By: /usr/share/keyrings/kali-archive-keyring.gpg

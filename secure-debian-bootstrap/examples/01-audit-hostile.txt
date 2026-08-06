@@ -1,0 +1,199 @@
+$ secure-debian-bootstrap --sys-root /  --audit
+# (captured against the "hostile" test fixture: a Debian trixie system whose
+#  APT configuration has been tampered with. Paths shown are the fixture root.)
+
+INFO  secure-debian-bootstrap 1.0.0, run 20260806T183020Z-00004987, mode audit
+INFO  state directory: /var/lib/s1
+
+== preflight ==
+FIND  [medium] world_writable_path_entry: /sbin mode=777
+FIND  [medium] world_writable_path_entry: /bin mode=777
+OK    preflight checks passed
+
+== detection ==
+INFO  Detected platform:     debian
+INFO  Distribution family:   debian
+INFO  Release name:          Debian GNU/Linux
+INFO  Release version:       13
+INFO  Codename:              trixie
+INFO  Pretty name:           Debian GNU/Linux 13 (trixie)
+INFO  Variant:               none
+INFO  Architecture:          amd64
+INFO  Foreign architectures: none
+INFO  Init system:           unknown
+INFO  Is Termux:             no
+INFO  Running as root:       yes
+INFO  sudo available:        no
+INFO  Package manager:       /usr/bin/apt-get
+INFO  APT config root:       /var/lib/h/etc/apt
+INFO  Keyring directories:   /var/lib/h/etc/apt/trusted.gpg.d /var/lib/h/etc/apt/keyrings /var/lib/h/usr/share/keyrings
+INFO  Write roots:           /var/lib/h/etc/apt /var/lib/h/var/lib/secure-debian-bootstrap /var/lib/s1
+INFO  Confidence:            60%
+INFO  Ambiguous:             no
+INFO  Evidence:
+INFO    - read /var/lib/h/etc/os-release
+INFO    - ID=debian ID_LIKE= VERSION_ID=13 CODENAME=trixie
+INFO    - apt-get=/usr/bin/apt-get
+INFO    - dpkg=/usr/bin/dpkg
+INFO    - arch=amd64 foreign=''
+INFO    - +40 os-release ID=debian
+INFO    - +20 debian-archive-keyring.gpg present
+INFO    - init=unknown
+INFO    - apt_etc=/var/lib/h/etc/apt
+INFO    - write_roots=/var/lib/h/etc/apt /var/lib/h/var/lib/secure-debian-bootstrap /var/lib/s1
+INFO    - apt_etc=/var/lib/h/etc/apt
+INFO    - write_roots=/var/lib/h/etc/apt /var/lib/h/var/lib/secure-debian-bootstrap /var/lib/s1
+
+== inventory ==
+OK    inventoried 10 paths -> /var/lib/s1/runs/20260806T183020Z-00004987/inventory.tsv
+
+== audit ==
+FIND  [high] repo_trusted_yes: /var/lib/h/etc/apt/sources.list:1 signature verification is disabled for http://evil.example.net/debian trixie
+FIND  [low] repo_plain_http: /var/lib/h/etc/apt/sources.list:1 http://evil.example.net/debian
+FIND  [low] repo_plain_http: /var/lib/h/etc/apt/sources.list:2 http://deb.debian.org/debian
+FIND  [low] repo_plain_http: /var/lib/h/etc/apt/sources.list:3 http://deb.debian.org/debian
+FIND  [low] repo_plain_http: /var/lib/h/etc/apt/sources.list:4 http://http.kali.org/kali
+FIND  [low] repo_plain_http: /var/lib/h/etc/apt/sources.list:5 http://deb.debian.org/debian
+FIND  [medium] repo_duplicate: /var/lib/h/etc/apt/sources.list:3 duplicates /var/lib/h/etc/apt/sources.list:2 (http://deb.debian.org/debian trixie)
+FIND  [high] repo_cross_distribution: /var/lib/h/etc/apt/sources.list:4 http.kali.org belongs to another distribution and must not be mixed into debian
+FIND  [medium] repo_suite_mismatch: /var/lib/h/etc/apt/sources.list:4 suite 'kali-rolling' does not match detected release 'trixie'
+FIND  [high] repo_development_suite: /var/lib/h/etc/apt/sources.list:5 suite 'sid' is a development suite on a 'trixie' system
+FIND  [high] apt_conf_executable: /var/lib/h/etc/apt/apt.conf.d/99-hostile configuration file has the executable bit set
+FIND  [high] apt_hook: /var/lib/h/etc/apt/apt.conf.d/99-hostile:1 APT invokes a shell command: DPkg::Pre-Invoke {"/tmp/payload.sh";};
+FIND  [medium] apt_proxy: /var/lib/h/etc/apt/apt.conf.d/99-hostile:2 Acquire::http::Proxy "http://user:REDACTED@proxy.example.net:3128";
+FIND  [high] apt_verification_disabled: /var/lib/h/etc/apt/apt.conf.d/99-hostile:3 APT::Get::AllowUnauthenticated "true";
+FIND  [medium] apt_pinning: /var/lib/h/etc/apt/preferences.d/pin-old APT pinning is configured; review it before repair (pinning can hold packages at vulnerable versions)
+FIND  [high] unsafe_symlink: /var/lib/h/etc/apt/trusted.gpg.d/escape.gpg points outside expected roots: ../../../secret/data
+WARN  release status came from the built-in table dated 2026-08-06;
+WARN  install 'distro-info-data' on this host for authoritative dates
+INFO  release status: supported (eol 2028-08-09)
+INFO  findings: 7 high, 6 medium, 5 low
+
+== package trust ==
+FIND  [medium] keyring_symlink: /var/lib/h/etc/apt/trusted.gpg.d/escape.gpg trust anchor is a symlink to ../../../secret/data
+FIND  [high] keyring_unowned: /var/lib/h/etc/apt/trusted.gpg.d/escape.gpg trust anchor is not owned by any installed package (mode=777 owner=root:root)
+FIND  [high] keyring_writable: /var/lib/h/etc/apt/trusted.gpg.d/escape.gpg trust anchor is group/world-writable (mode=777)
+FIND  [high] keyring_unowned: /var/lib/h/usr/share/keyrings/debian-archive-keyring.gpg trust anchor is not owned by any installed package (mode=644 owner=root:root)
+INFO  inspected 2 trust anchor(s)
+FIND  [low] apt_key_present: /usr/bin/apt-key apt-key is deprecated; this tool never uses it and neither should new configuration
+OK    dpkg database is consistent
+
+== report ==
+secure-debian-bootstrap report
+=============================
+
+run id:      20260806T183020Z-00004987
+mode:        audit
+dry run:     no
+started:     2026-08-06T18:30:20Z
+finished:    2026-08-06T18:30:28Z
+tool:        1.0.0
+
+-- detection --
+Detected platform:     debian
+Distribution family:   debian
+Release name:          Debian GNU/Linux
+Release version:       13
+Codename:              trixie
+Pretty name:           Debian GNU/Linux 13 (trixie)
+Variant:               none
+Architecture:          amd64
+Foreign architectures: none
+Init system:           unknown
+Is Termux:             no
+Running as root:       yes
+sudo available:        no
+Package manager:       /usr/bin/apt-get
+APT config root:       /var/lib/h/etc/apt
+Keyring directories:   /var/lib/h/etc/apt/trusted.gpg.d /var/lib/h/etc/apt/keyrings /var/lib/h/usr/share/keyrings
+Write roots:           /var/lib/h/etc/apt /var/lib/h/var/lib/secure-debian-bootstrap /var/lib/s1
+Confidence:            60%
+Ambiguous:             no
+Evidence:
+  - read /var/lib/h/etc/os-release
+  - ID=debian ID_LIKE= VERSION_ID=13 CODENAME=trixie
+  - apt-get=/usr/bin/apt-get
+  - dpkg=/usr/bin/dpkg
+  - arch=amd64 foreign=''
+  - +40 os-release ID=debian
+  - +20 debian-archive-keyring.gpg present
+  - init=unknown
+  - apt_etc=/var/lib/h/etc/apt
+  - write_roots=/var/lib/h/etc/apt /var/lib/h/var/lib/secure-debian-bootstrap /var/lib/s1
+  - apt_etc=/var/lib/h/etc/apt
+  - write_roots=/var/lib/h/etc/apt /var/lib/h/var/lib/secure-debian-bootstrap /var/lib/s1
+
+-- inventory --
+  admin          2
+  distro-repo    1
+  keyring        2
+  unknown        5
+  full inventory: /var/lib/s1/runs/20260806T183020Z-00004987/inventory.tsv
+
+-- findings --
+  high:   10
+  medium: 7
+  low:    6
+
+  [medium] world_writable_path_entry    /sbin
+             mode=777
+  [medium] world_writable_path_entry    /bin
+             mode=777
+  [high  ] repo_trusted_yes             /var/lib/h/etc/apt/sources.list:1
+             signature verification is disabled for http://evil.example.net/debian trixie
+  [low   ] repo_plain_http              /var/lib/h/etc/apt/sources.list:1
+             http://evil.example.net/debian
+  [low   ] repo_plain_http              /var/lib/h/etc/apt/sources.list:2
+             http://deb.debian.org/debian
+  [low   ] repo_plain_http              /var/lib/h/etc/apt/sources.list:3
+             http://deb.debian.org/debian
+  [low   ] repo_plain_http              /var/lib/h/etc/apt/sources.list:4
+             http://http.kali.org/kali
+  [low   ] repo_plain_http              /var/lib/h/etc/apt/sources.list:5
+             http://deb.debian.org/debian
+  [medium] repo_duplicate               /var/lib/h/etc/apt/sources.list:3
+             duplicates /var/lib/h/etc/apt/sources.list:2 (http://deb.debian.org/debian trixie)
+  [high  ] repo_cross_distribution      /var/lib/h/etc/apt/sources.list:4
+             http.kali.org belongs to another distribution and must not be mixed into debian
+  [medium] repo_suite_mismatch          /var/lib/h/etc/apt/sources.list:4
+             suite 'kali-rolling' does not match detected release 'trixie'
+  [high  ] repo_development_suite       /var/lib/h/etc/apt/sources.list:5
+             suite 'sid' is a development suite on a 'trixie' system
+  [high  ] apt_conf_executable          /var/lib/h/etc/apt/apt.conf.d/99-hostile
+             configuration file has the executable bit set
+  [high  ] apt_hook                     /var/lib/h/etc/apt/apt.conf.d/99-hostile:1
+             APT invokes a shell command: DPkg::Pre-Invoke {\
+  [medium] apt_proxy                    /var/lib/h/etc/apt/apt.conf.d/99-hostile:2
+             Acquire::http::Proxy \
+  [high  ] apt_verification_disabled    /var/lib/h/etc/apt/apt.conf.d/99-hostile:3
+             APT::Get::AllowUnauthenticated \
+  [medium] apt_pinning                  /var/lib/h/etc/apt/preferences.d/pin-old
+             APT pinning is configured; review it before repair (pinning can hold packages at vulnerable versions)
+  [high  ] unsafe_symlink               /var/lib/h/etc/apt/trusted.gpg.d/escape.gpg
+             points outside expected roots: ../../../secret/data
+  [medium] keyring_symlink              /var/lib/h/etc/apt/trusted.gpg.d/escape.gpg
+             trust anchor is a symlink to ../../../secret/data
+  [high  ] keyring_unowned              /var/lib/h/etc/apt/trusted.gpg.d/escape.gpg
+             trust anchor is not owned by any installed package (mode=777 owner=root:root)
+  [high  ] keyring_writable             /var/lib/h/etc/apt/trusted.gpg.d/escape.gpg
+             trust anchor is group/world-writable (mode=777)
+  [high  ] keyring_unowned              /var/lib/h/usr/share/keyrings/debian-archive-keyring.gpg
+             trust anchor is not owned by any installed package (mode=644 owner=root:root)
+  [low   ] apt_key_present              /usr/bin/apt-key
+             apt-key is deprecated; this tool never uses it and neither should new configuration
+
+-- release --
+  status: supported
+  eol:    2028-08-09
+
+-- artifacts --
+  run directory: /var/lib/s1/runs/20260806T183020Z-00004987
+  log:           /var/lib/s1/runs/20260806T183020Z-00004987/run.log
+  events:        /var/lib/s1/runs/20260806T183020Z-00004987/events.jsonl
+  staging:       /var/lib/s1/runs/20260806T183020Z-00004987/staging
+
+-- how to undo this run --
+  no backup was taken (no modifying stage ran)
+
+INFO  report:      /var/lib/s1/runs/20260806T183020Z-00004987/report.txt
+INFO  report json: /var/lib/s1/runs/20260806T183020Z-00004987/report.json

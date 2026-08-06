@@ -1,0 +1,20 @@
+# Example hardening configuration.
+# Copy to hardening.conf and edit. Same rules as defaults.conf: read as data,
+# never sourced.
+#
+# Each control named here must exist in lib/baseline-hardening.sh as
+# sdb_h_<control>. Controls not in the detected platform's profile are ignored -
+# a control is never applied on a platform that cannot support it.
+
+# Controls to skip even when the platform profile includes them.
+# Space-separated.
+SDB_HARDENING_SKIP="firewall auditd"
+
+# Controls to add beyond the platform profile. These are still gated by the
+# platform's unsupported list, so this cannot force an impossible control.
+SDB_HARDENING_EXTRA=""
+
+# Opt in to controls the platform marks as opt-in (Kali/Parrot: firewall,
+# sysctl_network, aide, fail2ban). Setting this on a security-testing
+# workstation may break testing workflows - that is why it is not the default.
+SDB_HARDENING_ACCEPT_OPTIN=0
