@@ -54,6 +54,33 @@ there are no backticks, no `shell=True`, and no eval, exec, pickle,
 `os.system` or `bash -c`. It also checks that no shell interpretation happens
 (shell metacharacters are passed literally to a real `echo`).
 
+### V1.1 (`tests/test_v11.py`)
+
+Uses the real `minisign` and `age` binaries with throw-away keys in temporary
+directories. No production key exists in the tests. The classes are skipped
+when those tools are missing.
+
+| Area | Tests (class) |
+|---|---|
+| Termux: valid package, SHA-256 values, signature, no secret key or plaintext in the package, deterministic manifest/container, duplicate/absolute/`..` paths, symlink, FIFO, socket, device node (where permitted), hard link, malformed/Unicode names, zero-byte and large files, spaces/leading dash/shell metacharacters (round-tripped without interpretation), key overwrite and overlap protection | `TermuxPreparationTests` |
+| Pinning by fingerprint (a forged key with a copied key ID is refused), explicit replacement, private non-overwritten transport identity, keys required before any device access, keys on the transport USB refused | `KeyPinningTests` |
+| Valid end-to-end transfer; modified manifest/signature, malformed signature, wrong key, modified/swapped payload, re-signed payload hash, comment binding, transfer ID mismatch, duplicate entries and JSON keys, malformed/oversized manifest, unknown version, traversal/absolute paths, files differing from the signed manifest, content-policy violation, package structure, symlinked member, missing package, no silent downgrade, incomplete set, staging tampered before export, key changed before export | `AuthenticatedTransferTests` |
+| Wrong identity, truncated/modified/empty ciphertext, partial decrypt failure after the first chunk, unexpected plaintext (non-tar, extra/symlink/hardlink/dir/FIFO/device/absolute/traversal/missing members), no plaintext left behind on failure | `EncryptionTests` |
+| Pre-existing root file, `autorun.inf`, executable, hidden file, directory, `System Volume Information`; contamination during export (outside or inside the transfer directory, hidden, `.lnk`, `autorun.inf`, executable); modified or removed file; file added after release; forwarded signed manifest altered; allowlist mechanism exact and empty | `WholeDestinationTests` |
+| Block read-only set, verification failure, mount not read-only, missing `noexec`/`nodev`/`nosuid`, device becomes writable, device disappears, identity change, kernel superblock `ro` required | `ReadOnlyTests` |
+| Gates cannot be skipped, reordered or repeated; release needs the removal gate; V1.0 session migration; V1.0 config still loads; no bypass options | `GateStateMachineTests`, `V11SourceHygieneTests` |
+
+Intentional updates to V1.0 tests:
+- `tests/test_airlock.py` now calls `ingest --legacy`, because the default
+  ingest is authenticated.
+- `test_block_readonly_failure_is_a_hard_stop` replaces the PROCEED-override
+  test.
+- The quarantine permission test expects sealed 0500/0400 permissions.
+- The planted-symlink destination test now expects `DESTINATION_NOT_CLEAN`.
+- Findings are reported as whole-filesystem paths.
+
+Each of these changes is commented in the test.
+
 ### PR #3 review findings
 
 `PullRequestReviewRegressionTests` in `tests/test_airlock.py` has a test named
@@ -91,13 +118,14 @@ cat > /tmp/airsim/scenario.json <<'EOF'
 ]}
 EOF
 A="python3 -I -B airlock.py --simulate /tmp/airsim/scenario.json"
-$A ingest      # type YES, then REMOVED (the simulator "unplugs" the source)
+$A ingest --legacy   # type YES, then REMOVED (the simulator "unplugs" the source)
 $A review      # a, APPROVE
 $A release     # Enter (the simulator "inserts" the destination), WRITE 0001
 $A verify-clean
 ```
 
-Simulation sessions use a separate state directory (`...-simulation`) and
+The CLI simulator demonstrates the V1.0 flow with `ingest --legacy` (authenticated
+packages need the MX keys; see README). Simulation sessions use a separate state directory (`...-simulation`) and
 cannot be mixed with real-device sessions. Optional device keys: `model`,
 `vendor`, `size`, `fstype`, `tran`, and `automount` (`"rw"` or `"ro"`, source
 only). Prompts need an interactive terminal: piped input is refused by design.

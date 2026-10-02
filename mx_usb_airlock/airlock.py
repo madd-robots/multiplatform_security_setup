@@ -17,10 +17,13 @@ See README.md and SECURITY_MODEL.md for the trust model and its limits.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import copy
 import datetime
 import errno
 import hashlib
+import io
 import json
 import math
 import os
@@ -30,6 +33,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import traceback
@@ -39,8 +43,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 APP_NAME = "mx_usb_airlock"
-APP_VERSION = "1.0.0"
-SESSION_SCHEMA = 1
+APP_VERSION = "1.1.0"
+SESSION_SCHEMA = 2
+SUPPORTED_SESSION_SCHEMAS = (1, 2)
 
 PHASE_INGEST_IN_PROGRESS = "INGEST_IN_PROGRESS"
 PHASE_INGESTED = "INGESTED_AWAITING_SOURCE_REMOVAL"
@@ -444,7 +449,7 @@ class CommandRunner:
         self._privilege_ready = True
 
     def run(self, tool: str, args: Sequence[Any], timeout: int = 30, privileged: bool = False,
-            input_text: Optional[str] = None, check: bool = True) -> CmdResult:
+            input_text: Optional[Any] = None, check: bool = True, binary: bool = False) -> CmdResult:
         exe = find_tool(tool)
         if exe is None:
             raise ToolMissing(tool)
@@ -455,9 +460,10 @@ class CommandRunner:
                 raise BlockingError("PRIVILEGE_UNAVAILABLE", "root is required for %s but sudo was not found" % tool)
             argv = [sudo, "--"] + argv
         kwargs: Dict[str, Any] = {
-            "capture_output": True, "text": True, "encoding": "utf-8", "errors": "replace",
-            "timeout": timeout, "env": dict(SAFE_ENV), "shell": False, "check": False,
+            "capture_output": True, "timeout": timeout, "env": dict(SAFE_ENV), "shell": False, "check": False,
         }
+        if not binary:
+            kwargs.update({"text": True, "encoding": "utf-8", "errors": "replace"})
         if input_text is None:
             kwargs["stdin"] = subprocess.DEVNULL
         else:
@@ -468,6 +474,9 @@ class CommandRunner:
             raise BlockingError("COMMAND_TIMEOUT", "%s did not finish within %d seconds" % (tool, timeout))
         except OSError as exc:
             raise BlockingError("COMMAND_FAILED", "%s could not be started: %s" % (tool, exc.strerror))
+        if binary:
+            # stdout stays bytes (it may be decrypted plaintext and is never logged)
+            proc.stderr = proc.stderr.decode("utf-8", "replace")
         if self.log:
             self.log.event("command", tool=tool, args=[display_text(a, 120) for a in args],
                            privileged=privileged, returncode=proc.returncode,
@@ -533,6 +542,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "compute_sha512": True,
     "clamav_enabled": True,
     "destination_dir_name": "RECOVERY_TRANSFER",
+    "max_transfer_payload_bytes": 64 * 1024 * 1024,
 }
 
 _CONFIG_LIMITS = {
@@ -542,6 +552,7 @@ _CONFIG_LIMITS = {
     "max_scan_entries": (1, 1000000),
     "max_depth": (0, 32),
     "max_name_length": (8, 255),
+    "max_transfer_payload_bytes": (1, 512 * 1024 * 1024),
 }
 
 
@@ -1413,12 +1424,23 @@ class LinuxBackend:
             raise BlockingError("MOUNT_SOURCE_MISMATCH", "mount at %s is not backed by the selected device" % real)
         need = {"nodev", "nosuid", "noexec", "ro" if expect_ro else "rw"}
         missing = need - set(entry.options)
+        if expect_ro and "ro" not in entry.super_options:
+            missing.add("ro (superblock)")
         if missing:
             raise BlockingError("MOUNT_OPTIONS_NOT_ENFORCED", "mount is missing options: %s" % ",".join(sorted(missing)))
         if _majmin_of_dev(os.stat(real).st_dev) != part.maj_min:
             raise BlockingError("MOUNT_SOURCE_MISMATCH", "mounted filesystem device number does not match")
         return {"target": real, "fstype": entry.fstype, "options": sorted(entry.options),
                 "super_options": sorted(entry.super_options)}
+
+    def verify_readonly(self, disk: Disk) -> bool:
+        """Kernel view (sysfs) of block-layer read-only for the disk and every partition."""
+        nodes = [(disk.kname, disk.maj_min)] + [(p.kname, p.maj_min) for p in disk.partitions if p.kname != disk.kname]
+        for kname, maj_min in nodes:
+            self.check_node(kname, maj_min)
+            if _read_sys("/sys/class/block/%s/ro" % kname) != "1":
+                return False
+        return True
 
     def expected_root_dev(self, part: Partition) -> Optional[int]:
         major, minor = part.maj_min.split(":")
@@ -1702,6 +1724,8 @@ class SimulatedBackend:
         self.readonly_supported = True
         self.flush_fails = False
         self.lockdown_link_failure = False
+        self.mount_ignores_ro = False
+        self.mount_drops_option = ""
         self.live_detected = True
         self.net: Dict[str, Any] = {"interfaces_up": [], "default_route": False, "rfkill": [], "known": True}
         self.clamav_result: Any = None
@@ -1780,9 +1804,9 @@ class SimulatedBackend:
         dev, _obj = self._locate(part.kname)
         if part.kname in self.mounted:
             raise BlockingError("MOUNT_FAILED", "partition already mounted")
-        opts = options.split(",")
-        self.mounted[part.kname] = {"target": str(target), "ro": "ro" in opts,
-                                    "options": opts, "automount": False}
+        opts = [o for o in options.split(",") if o != self.mount_drops_option]
+        ro = "ro" in opts and not self.mount_ignores_ro
+        self.mounted[part.kname] = {"target": str(target), "ro": ro, "options": opts, "automount": False}
         self.calls.append(("mount", (part.kname, fstype, options)))
         return dev["roots"][part.kname]
 
@@ -1796,6 +1820,9 @@ class SimulatedBackend:
         if missing:
             raise BlockingError("MOUNT_OPTIONS_NOT_ENFORCED", "missing options: %s" % ",".join(sorted(missing)))
         return {"target": str(root), "fstype": part.fstype, "options": sorted(m["options"]), "simulated": True}
+
+    def verify_readonly(self, disk: Disk) -> bool:
+        return disk.kname in self.readonly and disk.kname in self.devices
 
     def expected_root_dev(self, part: Partition) -> Optional[int]:
         return None
@@ -1998,7 +2025,7 @@ class StateStore:
         except FileNotFoundError:
             return None
         session = _read_private_json(self.session_path)
-        if not isinstance(session, dict) or session.get("schema") != SESSION_SCHEMA \
+        if not isinstance(session, dict) or session.get("schema") not in SUPPORTED_SESSION_SCHEMAS \
                 or not RUN_ID_RE.match(str(session.get("run_id", ""))):
             raise BlockingError("STATE_INVALID", "session file is not a valid airlock session")
         return session
@@ -2019,6 +2046,8 @@ class StateStore:
         except FileNotFoundError:
             return
         try:
+            if os.fstat(qfd).st_uid == os.geteuid():
+                os.fchmod(qfd, 0o700)  # staging may be sealed (0500)
             for name in os.listdir(qfd):
                 st = os.stat(name, dir_fd=qfd, follow_symlinks=False)
                 if stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode):
@@ -2047,8 +2076,12 @@ def add_blocking(session: Dict[str, Any], code: str, message: str) -> None:
 
 class Context:
     def __init__(self, console: Console, backend: Any, config: Dict[str, Any], store: StateStore,
-                 args: argparse.Namespace, operator_live_knames: Optional[Set[str]] = None):
+                 args: argparse.Namespace, operator_live_knames: Optional[Set[str]] = None,
+                 keys: Optional["KeyStore"] = None, runner: Optional[CommandRunner] = None):
         self.console = console
+        self.keys = keys if keys is not None else KeyStore(KeyStore.default_root())
+        # Crypto tools run unprivileged through the same argument-array runner.
+        self.runner = runner or (backend.runner if isinstance(backend, LinuxBackend) else CommandRunner())
         self.backend = backend
         self.config = config
         self.store = store
@@ -2065,6 +2098,7 @@ class Context:
         self.log = RunLog(self.store.root / "logs" / name, self.invocation)
         if isinstance(self.backend, LinuxBackend):
             self.backend.runner.log = self.log
+        self.runner.log = self.log
 
     def arg(self, name: str, default: Any = None) -> Any:
         return getattr(self.args, name, default)
@@ -2874,14 +2908,19 @@ def new_session(ctx: Context, env: Dict[str, Any], net: Dict[str, Any]) -> Dict[
         "warnings": [], "blocking": [], "source": None, "files": [], "rejected": [], "scan": {},
         "quarantine": {}, "trusted_hash_sources": [], "source_supplied_hash_lists": [], "clamav": None,
         "release_attempts": [], "release": None, "verification": None, "clean_verifications": [],
-        "source_removed_at": None,
+        "source_removed_at": None, "mode": MODE_LEGACY if ctx.arg("legacy") else MODE_AUTHENTICATED,
+        "gates": [], "authenticated": {},
     }
 
 
-def load_session_checked(ctx: Context) -> Dict[str, Any]:
+def load_session_checked(ctx: Context, allow_v1_0: bool = False) -> Dict[str, Any]:
     session = ctx.store.load_session()
     if session is None:
         raise BlockingError("NO_SESSION", "no active session; start with: python3 airlock.py ingest")
+    if session.get("schema") == 1 and not allow_v1_0 and session.get("phase") not in TERMINAL_PHASES:
+        raise BlockingError("SESSION_FROM_V1_0", "session %s was created by V1.0.0 and has no V1.1 gate record. "
+                            "Start over with 'ingest --new-session' (or 'discard-session'); its logs and reports "
+                            "are kept." % session["run_id"])
     if bool(session.get("simulated")) != bool(ctx.backend.simulated):
         raise BlockingError("SESSION_MODE_MISMATCH", "session was created in %s mode"
                             % ("simulation" if session.get("simulated") else "real-device"))
@@ -2931,6 +2970,7 @@ def confirm_no_removable_present(ctx: Context, session: Dict[str, Any]) -> None:
                        % ", ".join(display_text(d.preferred_by_id() or d.kname) for d in present))
             continue
         c.passed("Dirty source confirmed absent: no removable USB storage detected.")
+        pass_gate(ctx, session, GATE_INCOMING_REMOVED)
         session["phase"] = PHASE_SOURCE_REMOVED
         session["source_removed_at"] = utc_now()
         ctx.store.save_session(session)
@@ -2995,6 +3035,849 @@ def prepare_mountpoint(ctx: Context, role: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# V1.1: ordered transfer gates (layered on top of the session phases)
+# ---------------------------------------------------------------------------
+
+MODE_AUTHENTICATED = "AUTHENTICATED_V1_1"
+MODE_LEGACY = "LEGACY_UNAUTHENTICATED"
+
+GATE_INCOMING_QUARANTINED = "INCOMING_QUARANTINED"
+GATE_SIGNED_MANIFEST_VERIFIED = "SIGNED_MANIFEST_VERIFIED"
+GATE_ENCRYPTED_PAYLOAD_VERIFIED = "ENCRYPTED_PAYLOAD_VERIFIED"
+GATE_PAYLOAD_DECRYPTED = "PAYLOAD_DECRYPTED"
+GATE_DECRYPTED_FILES_VERIFIED = "DECRYPTED_FILES_VERIFIED"
+GATE_STAGING_SEALED = "STAGING_SEALED"
+GATE_INCOMING_REMOVED = "INCOMING_REMOVED"
+GATE_DESTINATION_CLEAN = "DESTINATION_VERIFIED_EMPTY_OR_PREPARED"
+GATE_PRE_EXPORT_REVERIFIED = "PRE_EXPORT_REVERIFIED"
+GATE_EXPORTED = "EXPORTED"
+GATE_DESTINATION_WHOLE_FS_VERIFIED = "DESTINATION_WHOLE_FS_VERIFIED"
+GATE_COMPLETE = "COMPLETE"
+
+RELEASE_GATES = (GATE_DESTINATION_CLEAN, GATE_PRE_EXPORT_REVERIFIED, GATE_EXPORTED,
+                 GATE_DESTINATION_WHOLE_FS_VERIFIED, GATE_COMPLETE)
+AUTH_GATES = (GATE_INCOMING_QUARANTINED, GATE_SIGNED_MANIFEST_VERIFIED, GATE_ENCRYPTED_PAYLOAD_VERIFIED,
+              GATE_PAYLOAD_DECRYPTED, GATE_DECRYPTED_FILES_VERIFIED, GATE_STAGING_SEALED,
+              GATE_INCOMING_REMOVED) + RELEASE_GATES
+LEGACY_GATES = (GATE_INCOMING_QUARANTINED, GATE_STAGING_SEALED, GATE_INCOMING_REMOVED) + RELEASE_GATES
+
+
+def gate_sequence(session: Dict[str, Any]) -> Tuple[str, ...]:
+    return AUTH_GATES if session.get("mode") == MODE_AUTHENTICATED else LEGACY_GATES
+
+
+def gates_passed(session: Dict[str, Any]) -> List[str]:
+    return [g["gate"] for g in session.get("gates", [])]
+
+
+def pass_gate(ctx: "Context", session: Dict[str, Any], gate: str, **details: Any) -> None:
+    """Record a gate; only the next gate in the mode's sequence may be passed (no skipping, no reordering)."""
+    seq = gate_sequence(session)
+    done = gates_passed(session)
+    expected = seq[len(done)] if len(done) < len(seq) else None
+    if gate != expected:
+        raise BlockingError("ILLEGAL_TRANSITION", "gate %s cannot be passed now (next allowed gate: %s)"
+                            % (gate, expected or "none"))
+    session.setdefault("gates", []).append({"gate": gate, "at": utc_now()})
+    ctx.log.event("gate_passed", gate=gate, **details)
+    ctx.store.save_session(session)
+
+
+def require_gate(session: Dict[str, Any], gate: str) -> None:
+    if gate not in gates_passed(session):
+        raise BlockingError("ILLEGAL_TRANSITION", "required gate %s has not been passed" % gate)
+
+
+def reset_release_gates(session: Dict[str, Any]) -> None:
+    """A new release attempt restarts the destination gates; ingest gates are kept."""
+    session["gates"] = [g for g in session.get("gates", []) if g["gate"] not in RELEASE_GATES]
+
+
+# ---------------------------------------------------------------------------
+# V1.1: keys (pinned minisign verification key, MX-local age transport identity)
+# ---------------------------------------------------------------------------
+
+MINISIGN_ALGORITHMS = (b"Ed", b"ED")
+AGE_RECIPIENT_RE = re.compile(r"^age1[02-9ac-hj-np-z]{58}$")
+
+
+def _decode_b64(text: str, length: int, what: str) -> bytes:
+    try:
+        blob = base64.b64decode(text.strip(), validate=True)
+    except (ValueError, binascii.Error):
+        raise BlockingError("KEY_FORMAT_INVALID", "%s is not valid base64" % what)
+    if len(blob) != length:
+        raise BlockingError("KEY_FORMAT_INVALID", "%s has the wrong length" % what)
+    return blob
+
+
+def format_fingerprint(hex_digest: str) -> str:
+    h = hex_digest.upper()
+    return "-".join(h[i:i + 4] for i in range(0, len(h), 4))
+
+
+def fingerprint_confirmation(hex_digest: str) -> str:
+    """First 80 bits of the fingerprint, as the operator types it when pinning."""
+    return format_fingerprint(hex_digest)[:24]
+
+
+def parse_minisign_public_key(raw: bytes) -> Dict[str, str]:
+    """Parse a minisign public key. The fingerprint is the SHA-256 of the 32-byte Ed25519 key.
+
+    The minisign key ID is chosen at random and can be copied into any other
+    key, so pinning is confirmed by fingerprint, never by key ID alone.
+    """
+    if len(raw) > 4096:
+        raise BlockingError("KEY_FORMAT_INVALID", "public key file is too large")
+    try:
+        lines = [l.strip() for l in raw.decode("ascii").splitlines() if l.strip()]
+    except UnicodeDecodeError:
+        raise BlockingError("KEY_FORMAT_INVALID", "public key is not ASCII text")
+    if len(lines) == 2 and lines[0].startswith("untrusted comment:"):
+        b64 = lines[1]
+    elif len(lines) == 1:
+        b64 = lines[0]
+    else:
+        raise BlockingError("KEY_FORMAT_INVALID", "not a minisign public key")
+    blob = _decode_b64(b64, 42, "minisign public key")
+    if blob[:2] != b"Ed":
+        raise BlockingError("KEY_FORMAT_INVALID", "unsupported minisign key algorithm")
+    return {"key_id": blob[2:10][::-1].hex().upper(), "fingerprint": hashlib.sha256(blob[10:]).hexdigest(),
+            "b64": b64}
+
+
+def parse_minisign_signature(raw: bytes) -> Dict[str, str]:
+    if len(raw) > 4096:
+        raise BlockingError("SIGNATURE_MALFORMED", "signature file is too large")
+    try:
+        lines = raw.decode("utf-8").split("\n")
+    except UnicodeDecodeError:
+        raise BlockingError("SIGNATURE_MALFORMED", "signature is not UTF-8 text")
+    if lines and lines[-1] == "":
+        lines = lines[:-1]
+    if len(lines) != 4 or not lines[0].startswith("untrusted comment:") \
+            or not lines[2].startswith("trusted comment: "):
+        raise BlockingError("SIGNATURE_MALFORMED", "signature file does not have the minisign layout")
+    try:
+        blob = _decode_b64(lines[1], 74, "signature")
+        _decode_b64(lines[3], 64, "global signature")
+    except BlockingError:
+        raise BlockingError("SIGNATURE_MALFORMED", "signature encoding is invalid")
+    if blob[:2] not in MINISIGN_ALGORITHMS:
+        raise BlockingError("SIGNATURE_MALFORMED", "unsupported signature algorithm")
+    return {"key_id": blob[2:10][::-1].hex().upper(), "trusted_comment": lines[2][len("trusted comment: "):]}
+
+
+class KeyStore:
+    """Persistent MX key material: the pinned signing PUBLIC key and the MX-local age identity."""
+
+    SIGNING_PUB = "trusted_signing_key.pub"
+    SIGNING_META = "trusted_signing_key.json"
+    IDENTITY = "transport_identity.age"
+    RECIPIENT = "transport_recipient.txt"
+
+    def __init__(self, root: Path):
+        self.root = Path(root)
+
+    @staticmethod
+    def default_root() -> Path:
+        base = os.environ.get("XDG_CONFIG_HOME", "")
+        if not base or not os.path.isabs(base):
+            base = os.path.join(os.path.expanduser("~"), ".config")
+        return Path(base) / APP_NAME / "keys"
+
+    def ensure(self) -> None:
+        parent = self.root.parent
+        if not parent.exists():
+            os.makedirs(str(parent), 0o700, exist_ok=True)
+        ensure_private_dir(self.root)
+
+    def path(self, name: str) -> Path:
+        return self.root / name
+
+    def exists(self, name: str) -> bool:
+        return os.path.lexists(str(self.path(name)))
+
+    def read(self, name: str, limit: int = 4096) -> bytes:
+        try:
+            fd = os.open(str(self.path(name)), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError as exc:
+            raise BlockingError("KEY_UNAVAILABLE", "cannot open %s: %s" % (self.path(name), exc.strerror))
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o077 \
+                    or st.st_size > limit:
+                raise BlockingError("KEY_UNAVAILABLE", "%s must be a private (0600) regular file owned by you"
+                                    % self.path(name))
+            return read_bounded(fd, limit + 1)
+        finally:
+            os.close(fd)
+
+    def write_new(self, name: str, data: bytes) -> None:
+        fd = os.open(str(self.path(name)), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            write_all(fd, data)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def retire(self, name: str) -> None:
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        os.rename(str(self.path(name)), str(self.path("retired-%s-%s-%s" % (stamp, secrets.token_hex(3), name))))
+
+    def signing_key(self) -> Dict[str, str]:
+        if not self.exists(self.SIGNING_PUB):
+            raise BlockingError("NO_TRUSTED_SIGNING_KEY", "no trusted signing key is pinned; run trust-signing-key "
+                                "with the public key and fingerprint from the trusted Termux device")
+        key = parse_minisign_public_key(self.read(self.SIGNING_PUB))
+        key["path"] = str(self.path(self.SIGNING_PUB))
+        return key
+
+    def identity_path(self) -> Path:
+        if not self.exists(self.IDENTITY):
+            raise BlockingError("NO_TRANSPORT_IDENTITY", "no transport identity exists; run init-transport-key and "
+                                "give its recipient to the Termux device")
+        data = self.read(self.IDENTITY)
+        if b"AGE-SECRET-KEY-1" not in data:
+            raise BlockingError("KEY_UNAVAILABLE", "transport identity file is not an age identity")
+        return self.path(self.IDENTITY)
+
+    def recipient(self) -> str:
+        text = self.read(self.RECIPIENT).decode("ascii", "replace").strip()
+        if not AGE_RECIPIENT_RE.match(text):
+            raise BlockingError("KEY_UNAVAILABLE", "stored transport recipient is invalid")
+        return text
+
+
+# ---------------------------------------------------------------------------
+# V1.1: signed transfer package (manifest validation, package reading, extraction)
+# ---------------------------------------------------------------------------
+
+TRANSFER_FORMAT = "mx_usb_airlock.transfer"
+TRANSFER_FORMAT_VERSION = 1
+ENCRYPTION_ALGORITHM = "age-x25519-v1"
+SIGNATURE_ALGORITHM = "minisign-ed25519"
+CONTAINER_FORMAT = "ustar"
+PACKAGE_DIR = "AIRLOCK_TRANSFER"
+PKG_MANIFEST = "manifest.json"
+PKG_SIGNATURE = "manifest.minisig"
+PKG_PAYLOAD = "payload.age"
+PKG_TRANSFER_ID = "TRANSFER_ID"
+PKG_README = "README_TRANSFER.txt"
+PACKAGE_REQUIRED = (PKG_MANIFEST, PKG_SIGNATURE, PKG_PAYLOAD)
+PACKAGE_OPTIONAL = (PKG_TRANSFER_ID, PKG_README)
+PACKAGE_SIZE_LIMITS = {PKG_MANIFEST: 1024 * 1024, PKG_SIGNATURE: 4096, PKG_TRANSFER_ID: 256, PKG_README: 65536}
+FILE_TYPES = {"ps1": "powershell-script", "txt": "text", "md": "markdown", "json": "json", "csv": "csv",
+              "sha256": "checksum-list", "sha256sum": "checksum-list"}
+TRANSFER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,63}$")
+UTC_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+MANIFEST_KEYS = frozenset({"format", "format_version", "transfer_id", "created_utc", "file_count",
+                           "total_plaintext_bytes", "encryption_algorithm", "signature_algorithm",
+                           "container_format", "payload", "files"})
+QUARANTINE_PKG_FILES = {PKG_MANIFEST: "pkg_manifest.json", PKG_SIGNATURE: "pkg_manifest.minisig"}
+
+
+def expected_file_type(name: str) -> str:
+    return FILE_TYPES.get(file_extension(name), "text")
+
+
+def signed_comment(transfer_id: str, manifest_sha256: str) -> str:
+    return "mx_usb_airlock transfer_id=%s manifest_sha256=%s" % (transfer_id, manifest_sha256)
+
+
+def _strict_json(raw: bytes, what: str) -> Any:
+    def no_duplicates(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
+        result: Dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate key %r" % key)
+            result[key] = value
+        return result
+
+    def no_constants(name: str) -> Any:
+        raise ValueError("non-standard constant %s" % name)
+
+    try:
+        return json.loads(raw.decode("utf-8"), object_pairs_hook=no_duplicates, parse_constant=no_constants)
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        raise BlockingError("MANIFEST_MALFORMED", "%s is not valid strict JSON: %s" % (what, display_text(exc, 200)))
+
+
+def _int_field(value: Any, low: int, high: int, what: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
+        raise BlockingError("MANIFEST_MALFORMED", "%s must be an integer between %d and %d" % (what, low, high))
+    return value
+
+
+def validate_signed_manifest(raw: bytes, config: Dict[str, Any]) -> Dict[str, Any]:
+    """Structural validation of the (already signature-verified) manifest. Any deviation stops."""
+    if len(raw) > PACKAGE_SIZE_LIMITS[PKG_MANIFEST]:
+        raise BlockingError("MANIFEST_MALFORMED", "manifest exceeds the size limit")
+    data = _strict_json(raw, "manifest")
+    if not isinstance(data, dict):
+        raise BlockingError("MANIFEST_MALFORMED", "manifest must be a JSON object")
+    if data.get("format") != TRANSFER_FORMAT:
+        raise BlockingError("MANIFEST_MALFORMED", "manifest format is not %s" % TRANSFER_FORMAT)
+    if data.get("format_version") != TRANSFER_FORMAT_VERSION or isinstance(data.get("format_version"), bool):
+        raise BlockingError("MANIFEST_UNSUPPORTED_VERSION", "manifest format_version %s is not supported (expected %d)"
+                            % (display_text(data.get("format_version"), 20), TRANSFER_FORMAT_VERSION))
+    if set(data) != MANIFEST_KEYS:
+        raise BlockingError("MANIFEST_MALFORMED", "manifest fields differ from the expected set")
+    if not isinstance(data["transfer_id"], str) or not TRANSFER_ID_RE.match(data["transfer_id"]):
+        raise BlockingError("MANIFEST_MALFORMED", "invalid transfer_id")
+    if not isinstance(data["created_utc"], str) or not UTC_TS_RE.match(data["created_utc"]):
+        raise BlockingError("MANIFEST_MALFORMED", "invalid created_utc")
+    for key, value in (("encryption_algorithm", ENCRYPTION_ALGORITHM), ("signature_algorithm", SIGNATURE_ALGORITHM),
+                       ("container_format", CONTAINER_FORMAT)):
+        if data[key] != value:
+            raise BlockingError("MANIFEST_MALFORMED", "%s must be %s" % (key, value))
+    payload = data["payload"]
+    if not isinstance(payload, dict) or set(payload) != {"filename", "size", "sha256"}:
+        raise BlockingError("MANIFEST_MALFORMED", "invalid payload description")
+    if payload["filename"] != PKG_PAYLOAD:
+        raise BlockingError("MANIFEST_MALFORMED", "payload filename must be %s" % PKG_PAYLOAD)
+    _int_field(payload["size"], 1, config["max_transfer_payload_bytes"], "payload size")
+    if not isinstance(payload["sha256"], str) or not SHA256_RE.match(payload["sha256"]):
+        raise BlockingError("MANIFEST_MALFORMED", "invalid payload sha256")
+    files = data["files"]
+    count = _int_field(data["file_count"], 1, config["max_files"], "file_count")
+    if not isinstance(files, list) or len(files) != count:
+        raise BlockingError("MANIFEST_MALFORMED", "files list does not match file_count")
+    total = 0
+    seen: Set[str] = set()
+    dir_prefixes: Set[str] = set()
+    spelling: Dict[str, str] = {}  # case-folded path or prefix -> the one allowed spelling
+    for entry in files:
+        if not isinstance(entry, dict) or set(entry) != {"relative_path", "size", "sha256", "file_type"}:
+            raise BlockingError("MANIFEST_MALFORMED", "invalid file entry")
+        rel = entry["relative_path"]
+        if not isinstance(rel, str) or len(rel.encode("utf-8", "replace")) > 1024:
+            raise BlockingError("MANIFEST_MALFORMED", "invalid relative_path")
+        validate_relative_path(rel, config["max_name_length"], config["allow_non_ascii_names"])
+        if rel in seen:
+            raise BlockingError("MANIFEST_DUPLICATE_PATH", "duplicate path %s" % display_text(rel))
+        seen.add(rel)
+        parts = rel.split("/")
+        # Paths and directory prefixes must stay distinct on case-insensitive FAT/exFAT.
+        for i in range(1, len(parts) + 1):
+            prefix = "/".join(parts[:i])
+            if i < len(parts):
+                dir_prefixes.add(prefix)
+            key = unicodedata.normalize("NFC", prefix).casefold()
+            if spelling.setdefault(key, prefix) != prefix:
+                raise BlockingError("MANIFEST_DUPLICATE_PATH", "case-insensitive collision at %s" % display_text(prefix))
+        total += _int_field(entry["size"], 0, config["max_file_bytes"], "file size")
+        if not isinstance(entry["sha256"], str) or not SHA256_RE.match(entry["sha256"]):
+            raise BlockingError("MANIFEST_MALFORMED", "invalid file sha256")
+        if entry["file_type"] != expected_file_type(rel):
+            raise BlockingError("MANIFEST_MALFORMED", "file_type of %s does not match its extension" % display_text(rel))
+    both = seen & dir_prefixes
+    if both:
+        raise BlockingError("MANIFEST_DUPLICATE_PATH", "%s is both a file and a directory" % display_text(sorted(both)[0]))
+    if _int_field(data["total_plaintext_bytes"], 0, config["max_total_bytes"], "total_plaintext_bytes") != total:
+        raise BlockingError("MANIFEST_MALFORMED", "total_plaintext_bytes does not match the file sizes")
+    return data
+
+
+def read_transfer_package(root: Path, config: Dict[str, Any], expected_dev: Optional[int]) -> Dict[str, Any]:
+    """Read AIRLOCK_TRANSFER/ from the read-only source mount: exact member set, no links, bounded sizes."""
+    try:
+        root_fd = open_dir_nofollow(str(root))
+    except OSError as exc:
+        raise BlockingError("FILESYSTEM_DISAPPEARED", "cannot open source root: %s" % exc.strerror)
+    try:
+        root_st = os.fstat(root_fd)
+        if expected_dev is not None and root_st.st_dev != expected_dev:
+            raise BlockingError("MOUNT_SOURCE_MISMATCH", "source root is not on the selected device")
+        other = 0
+        try:
+            with os.scandir(root_fd) as it:
+                for entry in it:
+                    if entry.name != PACKAGE_DIR:
+                        other += 1
+                    if other >= config["max_scan_entries"]:
+                        break
+        except OSError as exc:
+            raise BlockingError("SOURCE_READ_ERROR", "cannot list source root: %s" % exc.strerror)
+        try:
+            st = os.stat(PACKAGE_DIR, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            raise BlockingError("NO_AUTHENTICATED_PACKAGE", "no %s/ package on this USB. Prepare one with "
+                                "usb_airlock_prepare on the trusted Termux device. Unauthenticated V1.0 transfers "
+                                "must be requested explicitly with: ingest --legacy" % PACKAGE_DIR)
+        except OSError as exc:
+            raise BlockingError("SOURCE_READ_ERROR", "cannot stat package directory: %s" % exc.strerror)
+        if not stat.S_ISDIR(st.st_mode) or st.st_dev != root_st.st_dev:
+            raise BlockingError("PACKAGE_STRUCTURE_INVALID", "%s is not a plain directory on this filesystem" % PACKAGE_DIR)
+        pfd = open_dir_nofollow(PACKAGE_DIR, dir_fd=root_fd)
+        try:
+            if (os.fstat(pfd).st_dev, os.fstat(pfd).st_ino) != (st.st_dev, st.st_ino):
+                raise BlockingError("SOURCE_CHANGED_DURING_SCAN", "package directory changed while being opened")
+            names: List[str] = []
+            with os.scandir(pfd) as it:
+                for entry in it:
+                    names.append(entry.name)
+                    if len(names) > len(PACKAGE_REQUIRED) + len(PACKAGE_OPTIONAL):
+                        break
+            unknown = sorted(set(names) - set(PACKAGE_REQUIRED) - set(PACKAGE_OPTIONAL))
+            if unknown or len(names) != len(set(names)):
+                raise BlockingError("PACKAGE_STRUCTURE_INVALID", "unexpected entries in %s/: %s"
+                                    % (PACKAGE_DIR, ", ".join(display_text(n, 60) for n in unknown[:10]) or "duplicates"))
+            missing = [n for n in PACKAGE_REQUIRED if n not in names]
+            if missing:
+                raise BlockingError("PACKAGE_STRUCTURE_INVALID", "package is missing: %s" % ", ".join(missing))
+            files: Dict[str, bytes] = {}
+            for name in names:
+                limit = PACKAGE_SIZE_LIMITS.get(name, config["max_transfer_payload_bytes"])
+                fst = os.stat(name, dir_fd=pfd, follow_symlinks=False)
+                if not stat.S_ISREG(fst.st_mode):
+                    raise BlockingError("PACKAGE_STRUCTURE_INVALID", "%s is not a regular file" % name)
+                if fst.st_size > limit or (name == PKG_PAYLOAD and fst.st_size == 0):
+                    raise BlockingError("PACKAGE_STRUCTURE_INVALID", "%s has an unacceptable size" % name)
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC, dir_fd=pfd)
+                try:
+                    ost = os.fstat(fd)
+                    if (ost.st_dev, ost.st_ino) != (fst.st_dev, fst.st_ino) or ost.st_dev != root_st.st_dev:
+                        raise BlockingError("SOURCE_CHANGED_DURING_SCAN", "%s changed while being opened" % name)
+                    data = read_bounded(fd, limit + 1)
+                finally:
+                    os.close(fd)
+                if len(data) != fst.st_size:
+                    raise BlockingError("PACKAGE_STRUCTURE_INVALID", "%s changed size while being read" % name)
+                files[name] = data
+        finally:
+            os.close(pfd)
+    except OSError as exc:
+        raise BlockingError("SOURCE_READ_ERROR", "read error in package: %s" % exc.strerror)
+    finally:
+        os.close(root_fd)
+    return {"files": files, "other_root_entries": other}
+
+
+def extract_verified_payload(plaintext: bytes, manifest: Dict[str, Any]) -> Dict[str, bytes]:
+    """Enumerate and validate every tar member against the signed manifest; never uses tar extraction."""
+    expected = {f["relative_path"]: f for f in manifest["files"]}
+    out: Dict[str, bytes] = {}
+    try:
+        tar = tarfile.open(fileobj=io.BytesIO(plaintext), mode="r:")
+    except (tarfile.TarError, OSError) as exc:
+        raise BlockingError("PAYLOAD_CONTAINER_INVALID", "decrypted payload is not a plain tar container: %s"
+                            % display_text(exc, 120))
+    try:
+        while True:
+            try:
+                member = tar.next()
+            except (tarfile.TarError, OSError) as exc:
+                raise BlockingError("PAYLOAD_CONTAINER_INVALID", "corrupt tar container: %s" % display_text(exc, 120))
+            if member is None:
+                break
+            if len(out) >= len(expected):
+                raise BlockingError("PAYLOAD_UNEXPECTED_MEMBER", "payload contains more members than the manifest")
+            if member.type not in (tarfile.REGTYPE, tarfile.AREGTYPE):
+                raise BlockingError("PAYLOAD_UNSAFE_MEMBER", "payload member %s is not a regular file (links, "
+                                    "directories, devices, FIFOs and sockets are refused)" % display_text(member.name))
+            name = member.name
+            validate_relative_path(name, 255, True)
+            if name in out:
+                raise BlockingError("PAYLOAD_DUPLICATE_MEMBER", "duplicate payload member %s" % display_text(name))
+            entry = expected.get(name)
+            if entry is None:
+                raise BlockingError("PAYLOAD_UNEXPECTED_MEMBER", "payload member %s is not in the signed manifest"
+                                    % display_text(name))
+            if member.size != entry["size"]:
+                raise BlockingError("DECRYPTED_FILE_MISMATCH", "size of %s differs from the signed manifest" % display_text(name))
+            handle = tar.extractfile(member)
+            data = handle.read(member.size + 1) if handle is not None else b""
+            if len(data) != entry["size"] or sha256_hex(data) != entry["sha256"]:
+                raise BlockingError("DECRYPTED_FILE_MISMATCH", "%s does not match its signed SHA-256" % display_text(name))
+            out[name] = data
+    finally:
+        tar.close()
+    missing = sorted(set(expected) - set(out))
+    if missing:
+        raise BlockingError("DECRYPTED_FILE_MISMATCH", "payload is missing signed files: %s"
+                            % ", ".join(display_text(m) for m in missing[:10]))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# V1.1: whole-destination inventory (contamination detection)
+# ---------------------------------------------------------------------------
+
+# Filesystem metadata allowed on the clean USB besides the transfer directory.
+# prepare-clean-usb (mkfs.vfat) and mkfs.exfat leave no directory entries that
+# Linux lists (the FAT volume label and exFAT bitmap/upcase entries are not
+# returned by readdir), so these allowlists are deliberately empty.  Windows
+# creates "System Volume Information" only after the drive has been attached
+# to Windows; a drive in that state is not freshly prepared and is refused.
+DEST_METADATA_ALLOWLIST: Dict[str, frozenset] = {"vfat": frozenset(), "exfat": frozenset()}
+
+
+@dataclass
+class WholeFsInventory:
+    files: Dict[str, Optional[str]] = field(default_factory=dict)
+    dirs: Set[str] = field(default_factory=set)
+    specials: List[str] = field(default_factory=list)
+    truncated: bool = False
+
+
+def whole_fs_inventory(root: Path, hash_paths: Iterable[str], max_bytes: int,
+                       max_entries: int = 20000) -> WholeFsInventory:
+    """Enumerate the ENTIRE mounted filesystem without following links; hash only the expected files."""
+    wanted = set(hash_paths)
+    inv = WholeFsInventory()
+    count = [0]
+
+    def walk(dfd: int, prefix: str, depth: int) -> None:
+        names: List[str] = []
+        with os.scandir(dfd) as it:
+            for entry in it:
+                if count[0] + len(names) >= max_entries:
+                    inv.truncated = True
+                    break
+                names.append(entry.name)
+        for name in sorted(names):
+            count[0] += 1
+            rel = (prefix + "/" + name) if prefix else name
+            st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+            if stat.S_ISDIR(st.st_mode):
+                inv.dirs.add(rel)
+                if depth >= 40:
+                    inv.specials.append(rel + " (nesting too deep)")
+                    continue
+                sub = open_dir_nofollow(name, dir_fd=dfd)
+                try:
+                    walk(sub, rel, depth + 1)
+                finally:
+                    os.close(sub)
+            elif stat.S_ISREG(st.st_mode):
+                digest = None
+                if rel in wanted:
+                    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dfd)
+                    try:
+                        data = read_bounded(fd, max_bytes + 1)
+                    finally:
+                        os.close(fd)
+                    digest = sha256_hex(data) if len(data) <= max_bytes else "TOO_LARGE"
+                inv.files[rel] = digest
+            else:
+                inv.specials.append(rel)
+
+    try:
+        rfd = open_dir_nofollow(str(root))
+    except OSError as exc:
+        raise BlockingError("DESTINATION_VERIFICATION_FAILED", "destination root not readable: %s" % exc.strerror)
+    try:
+        walk(rfd, "", 0)
+    except OSError as exc:
+        raise BlockingError("DESTINATION_VERIFICATION_FAILED", "error enumerating destination: %s" % exc.strerror)
+    finally:
+        os.close(rfd)
+    return inv
+
+
+def destination_findings(inv: WholeFsInventory, expected: Dict[str, str], fstype: str) -> Tuple[List[str], List[str]]:
+    """Return (contamination, mismatches) of a whole-filesystem inventory against the expected files."""
+    allowed = DEST_METADATA_ALLOWLIST.get(fstype, frozenset())
+    expected_dirs: Set[str] = set()
+    for path in expected:
+        parts = path.split("/")
+        for i in range(1, len(parts)):
+            expected_dirs.add("/".join(parts[:i]))
+    contamination = []
+    for d in sorted(inv.dirs):
+        if d not in expected_dirs and d not in allowed:
+            contamination.append("UNEXPECTED DIRECTORY %s" % display_text(d))
+    for f in sorted(inv.files):
+        if f not in expected and f not in allowed:
+            contamination.append("UNEXPECTED FILE %s" % display_text(f))
+    for s in inv.specials:
+        contamination.append("UNEXPECTED SPECIAL ENTRY %s" % display_text(s))
+    if inv.truncated:
+        contamination.append("TOO MANY ENTRIES (enumeration limit reached)")
+    mismatches = []
+    for path, digest in sorted(expected.items()):
+        if path not in inv.files:
+            mismatches.append("MISSING %s" % display_text(path))
+        elif inv.files[path] != digest:
+            mismatches.append("HASH MISMATCH %s" % display_text(path))
+    return contamination, mismatches
+
+
+# ---------------------------------------------------------------------------
+# V1.1: staging seal, read-only recheck, authenticated ingest pipeline
+# ---------------------------------------------------------------------------
+
+def seal_quarantine(qdir: Path) -> None:
+    """Make staged files 0400 and the directory 0500; later reads re-verify every SHA-256 anyway."""
+    qfd = open_dir_nofollow(str(qdir))
+    try:
+        for name in os.listdir(qfd):
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=qfd)
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise BlockingError("QUARANTINE_TAMPERED", "unexpected entry in staging")
+                os.fchmod(fd, 0o400)
+            finally:
+                os.close(fd)
+        os.fchmod(qfd, 0o500)
+    finally:
+        os.close(qfd)
+
+
+def write_quarantine_meta(qdir: Path, name: str, data: bytes) -> None:
+    qfd = open_dir_nofollow(str(qdir))
+    try:
+        _write_new_file(qfd, name, data)
+    finally:
+        os.close(qfd)
+
+
+def read_quarantine_meta(qdir: Path, name: str, expected_sha256: str, limit: int) -> bytes:
+    try:
+        qfd = open_dir_nofollow(str(qdir))
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=qfd)
+            try:
+                st = os.fstat(fd)
+                if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+                    raise BlockingError("QUARANTINE_TAMPERED", "staged %s is not a plain file" % name)
+                data = read_bounded(fd, limit + 1)
+            finally:
+                os.close(fd)
+        finally:
+            os.close(qfd)
+    except OSError as exc:
+        raise BlockingError("QUARANTINE_TAMPERED", "cannot read staged %s: %s" % (name, exc.strerror))
+    if sha256_hex(data) != expected_sha256:
+        raise BlockingError("QUARANTINE_TAMPERED", "staged %s no longer matches its recorded SHA-256" % name)
+    return data
+
+
+def verify_block_readonly(ctx: "Context", disk: Disk, stage: str) -> None:
+    """Fail closed unless the kernel still reports the incoming device read-only at the block layer."""
+    if not ctx.backend.verify_readonly(disk):
+        ctx.log.event("block_readonly_lost", stage=stage, device=disk.kname)
+        raise BlockingError("BLOCK_READONLY_LOST", "the incoming device is no longer read-only at the block layer "
+                            "(%s). STOP." % stage)
+
+
+def verify_signature(ctx: "Context", key: Dict[str, str], manifest_path: Path, sig_path: Path,
+                     sig_raw: bytes) -> str:
+    """Verify manifest.minisig with the pinned key; returns the authenticated trusted comment."""
+    sig = parse_minisign_signature(sig_raw)
+    if sig["key_id"] != key["key_id"]:
+        raise BlockingError("WRONG_SIGNING_KEY", "manifest is signed by key %s, but the pinned key is %s"
+                            % (sig["key_id"], key["key_id"]))
+    res = ctx.runner.run("minisign", ["-V", "-Q", "-p", key["path"], "-m", str(manifest_path), "-x", str(sig_path)],
+                         timeout=60, check=False)
+    if res.returncode != 0:
+        raise BlockingError("SIGNATURE_INVALID", "minisign rejected the manifest signature: %s"
+                            % display_text(res.stderr.strip() or res.stdout.strip(), 200))
+    return res.stdout.strip()
+
+
+def authenticate_and_stage(ctx: "Context", session: Dict[str, Any], pkg: Dict[str, Any],
+                           qdir: Path) -> List[Dict[str, Any]]:
+    """Gate order: quarantine -> signature -> manifest -> payload hash -> decrypt -> verify -> seal."""
+    c = ctx.console
+    files = pkg["files"]
+    key = ctx.keys.signing_key()
+    identity = ctx.keys.identity_path()
+    for name, qname in QUARANTINE_PKG_FILES.items():
+        write_quarantine_meta(qdir, qname, files[name])
+    auth = session["authenticated"]
+    auth.update({"signing_key_id": key["key_id"], "signing_key_fingerprint": key["fingerprint"],
+                 "manifest_sha256": sha256_hex(files[PKG_MANIFEST]),
+                 "signature_sha256": sha256_hex(files[PKG_SIGNATURE])})
+    pass_gate(ctx, session, GATE_INCOMING_QUARANTINED, other_root_entries=pkg["other_root_entries"])
+
+    try:
+        comment = verify_signature(ctx, key, qdir / QUARANTINE_PKG_FILES[PKG_MANIFEST],
+                                   qdir / QUARANTINE_PKG_FILES[PKG_SIGNATURE], files[PKG_SIGNATURE])
+        # The bytes parsed below must be the bytes minisign just verified.
+        read_quarantine_meta(qdir, QUARANTINE_PKG_FILES[PKG_MANIFEST], auth["manifest_sha256"],
+                             PACKAGE_SIZE_LIMITS[PKG_MANIFEST])
+        manifest = validate_signed_manifest(files[PKG_MANIFEST], ctx.config)
+        if comment != signed_comment(manifest["transfer_id"], auth["manifest_sha256"]):
+            raise BlockingError("SIGNATURE_BINDING_MISMATCH", "the signed trusted comment does not bind this manifest")
+        if PKG_TRANSFER_ID in files:
+            marker = files[PKG_TRANSFER_ID].decode("ascii", "replace").strip()
+            if marker != manifest["transfer_id"]:
+                raise BlockingError("TRANSFER_ID_MISMATCH", "TRANSFER_ID file does not match the signed manifest")
+    except BlockingError as exc:
+        ctx.log.event("signature_verification", result="FAIL", code=exc.code, key_id=key["key_id"])
+        raise
+    auth.update({"transfer_id": manifest["transfer_id"], "created_utc": manifest["created_utc"],
+                 "file_count": manifest["file_count"], "payload_sha256": manifest["payload"]["sha256"]})
+    ctx.log.event("signature_verification", result="PASS", key_id=key["key_id"], fingerprint=key["fingerprint"],
+                  transfer_id=manifest["transfer_id"])
+    c.passed("SIGNED MANIFEST VERIFIED with pinned key %s (fingerprint %s), transfer %s"
+             % (key["key_id"], format_fingerprint(key["fingerprint"])[:24], manifest["transfer_id"]))
+    pass_gate(ctx, session, GATE_SIGNED_MANIFEST_VERIFIED, transfer_id=manifest["transfer_id"])
+
+    payload = files[PKG_PAYLOAD]
+    if len(payload) != manifest["payload"]["size"] or sha256_hex(payload) != manifest["payload"]["sha256"]:
+        ctx.log.event("encrypted_payload_hash", result="MISMATCH")
+        raise BlockingError("ENCRYPTED_PAYLOAD_MISMATCH", "payload.age does not match the signed manifest")
+    ctx.log.event("encrypted_payload_hash", result="MATCH", sha256=manifest["payload"]["sha256"])
+    c.passed("ENCRYPTED PAYLOAD MATCHES THE SIGNED MANIFEST")
+    pass_gate(ctx, session, GATE_ENCRYPTED_PAYLOAD_VERIFIED)
+
+    # Decrypt only now: exactly the bytes just verified, via stdin, to memory (no ciphertext re-read
+    # from disk, no plaintext temporary file), as the unprivileged user.
+    res = ctx.runner.run("age", ["-d", "-i", str(identity)], input_text=payload, timeout=600, check=False, binary=True)
+    if res.returncode != 0 or len(res.stdout) > len(payload):
+        ctx.log.event("decryption", result="FAIL")
+        raise BlockingError("DECRYPTION_FAILED", "age could not decrypt the payload with this machine's transport "
+                            "identity: %s" % display_text(res.stderr.strip(), 200))
+    ctx.log.event("decryption", result="PASS")
+    pass_gate(ctx, session, GATE_PAYLOAD_DECRYPTED)
+    plaintext = res.stdout
+    res = None
+    try:
+        contents = extract_verified_payload(plaintext, manifest)
+    except BlockingError as exc:
+        ctx.log.event("decrypted_file_verification", result="FAIL", code=exc.code)
+        raise
+    finally:
+        plaintext = b""
+
+    records: List[Dict[str, Any]] = []
+    for entry in manifest["files"]:
+        rel = entry["relative_path"]
+        name = rel.rsplit("/", 1)[-1]
+        reasons = check_extension(name, set(ctx.config["allowed_extensions"]))
+        for part in rel.split("/"):
+            reasons += check_name_component(part, ctx.config["max_name_length"], ctx.config["allow_non_ascii_names"])
+        if name.startswith(".") or name.lower() in SYSTEM_METADATA_FILES:
+            reasons.append("HIDDEN_OR_SYSTEM_FILE")
+        data = contents[rel]
+        rejects, flags, encoding = inspect_content(name, data)
+        if reasons or rejects:
+            ctx.log.event("decrypted_file_verification", result="FAIL", path=display_text(rel))
+            raise BlockingError("SIGNED_FILE_POLICY_VIOLATION", "signed file %s is refused by the content policy (%s); "
+                                "the transfer set must move as a whole, so nothing is staged"
+                                % (display_text(rel), ", ".join(reasons + rejects)))
+        records.append({
+            "original_name": name, "sanitized_display_name": display_text(name, 160), "relative_path": rel,
+            "relative_path_display": "/".join(display_text(p, 120) for p in rel.split("/")),
+            "size": len(data), "sha256": entry["sha256"], "sha512": sha512_hex(data) if ctx.config["compute_sha512"] else None,
+            "encoding": encoding, "file_type": entry["file_type"], "review_flags": flags, "_data": data,
+        })
+    ctx.log.event("decrypted_file_verification", result="PASS", files=[{"path": r["relative_path_display"],
+                                                                         "sha256": r["sha256"]} for r in records])
+    c.passed("DECRYPTED FILES MATCH THE SIGNED MANIFEST EXACTLY (%d files: names, sizes, SHA-256, types)" % len(records))
+    pass_gate(ctx, session, GATE_DECRYPTED_FILES_VERIFIED)
+
+    write_quarantine(qdir, records)
+    seal_quarantine(qdir)
+    pass_gate(ctx, session, GATE_STAGING_SEALED)
+    return records
+
+
+# ---------------------------------------------------------------------------
+# V1.1: key commands
+# ---------------------------------------------------------------------------
+
+def cmd_init_transport_key(ctx: "Context") -> int:
+    """Create this machine's age identity (decrypts transport packages). The secret never leaves MX."""
+    c = ctx.console
+    ctx.attach_log(None)
+    ctx.keys.ensure()
+    if ctx.keys.exists(KeyStore.IDENTITY):
+        if not ctx.arg("replace"):
+            c.info("A transport identity already exists; it was NOT replaced.")
+            c.line("Recipient for the Termux device: %s" % ctx.keys.recipient())
+            return 0
+        c.warn("Replacing the transport identity makes packages encrypted to the old recipient undecryptable here.")
+        c.confirm_phrase("REPLACE TRANSPORT KEY", "Replace the transport identity?")
+        ctx.keys.retire(KeyStore.IDENTITY)
+        if ctx.keys.exists(KeyStore.RECIPIENT):
+            ctx.keys.retire(KeyStore.RECIPIENT)
+    res = ctx.runner.run("age-keygen", [], timeout=60)
+    secret_lines = [l for l in res.stdout.splitlines() if l.startswith("AGE-SECRET-KEY-1")]
+    if len(secret_lines) != 1:
+        raise BlockingError("KEYGEN_FAILED", "age-keygen did not produce exactly one identity")
+    ctx.keys.write_new(KeyStore.IDENTITY, (res.stdout.strip() + "\n").encode("ascii"))
+    res = None
+    recipient = ctx.runner.run("age-keygen", ["-y", str(ctx.keys.path(KeyStore.IDENTITY))], timeout=60).stdout.strip()
+    if not AGE_RECIPIENT_RE.match(recipient):
+        raise BlockingError("KEYGEN_FAILED", "age-keygen returned an invalid recipient")
+    ctx.keys.write_new(KeyStore.RECIPIENT, (recipient + "\n").encode("ascii"))
+    ctx.log.event("transport_identity_created", recipient=recipient)
+    c.passed("Transport identity created in %s (mode 0600; never copy it anywhere)." % ctx.keys.path(KeyStore.IDENTITY))
+    c.line("Give this PUBLIC recipient to the Termux device (usb_airlock_prepare set-recipient):")
+    c.line("  %s" % recipient)
+    return 0
+
+
+def cmd_trust_signing_key(ctx: "Context") -> int:
+    """Pin the Termux signing PUBLIC key. Requires typing its fingerprint; replacement is explicit."""
+    c = ctx.console
+    ctx.attach_log(None)
+    ctx.keys.ensure()
+    if ctx.arg("public_key_string"):
+        raw = ctx.arg("public_key_string").encode("ascii", "replace")
+    elif ctx.arg("public_key"):
+        try:
+            fd = os.open(ctx.arg("public_key"), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError as exc:
+            raise ConfigError("cannot open public key: %s" % exc.strerror)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ConfigError("public key must be a regular file")
+            raw = read_bounded(fd, 4097)
+        finally:
+            os.close(fd)
+    else:
+        raise ConfigError("give --public-key FILE or --public-key-string BASE64")
+    key = parse_minisign_public_key(raw)
+    c.line("Signing public key  : key ID %s" % key["key_id"])
+    c.line("SHA-256 fingerprint : %s" % format_fingerprint(key["fingerprint"]))
+    if ctx.keys.exists(KeyStore.SIGNING_PUB):
+        current = ctx.keys.signing_key()
+        if current["fingerprint"] == key["fingerprint"]:
+            c.info("This key is already pinned; nothing changed.")
+            return 0
+        if not ctx.arg("replace"):
+            raise BlockingError("SIGNING_KEY_ALREADY_PINNED", "a different signing key (%s, fingerprint %s) is pinned. "
+                                "Changing it is a security-sensitive event; use --replace deliberately."
+                                % (current["key_id"], format_fingerprint(current["fingerprint"])[:24]))
+        c.warn("REPLACING the pinned signing key %s. Packages signed by the old key will be refused." % current["key_id"])
+        c.confirm_phrase("REPLACE SIGNING KEY %s" % key["key_id"], "Replace the trusted signing key?")
+    c.confirm_phrase(fingerprint_confirmation(key["fingerprint"]),
+                     "Compare with 'usb_airlock_prepare show-keys' on the trusted Termux device, then type the first "
+                     "five groups of the fingerprint exactly.")
+    if ctx.keys.exists(KeyStore.SIGNING_PUB):
+        ctx.keys.retire(KeyStore.SIGNING_PUB)
+        if ctx.keys.exists(KeyStore.SIGNING_META):
+            ctx.keys.retire(KeyStore.SIGNING_META)
+    pub = "untrusted comment: minisign public key %s\n%s\n" % (key["key_id"], key["b64"])
+    ctx.keys.write_new(KeyStore.SIGNING_PUB, pub.encode("ascii"))
+    meta = {"key_id": key["key_id"], "fingerprint_sha256": key["fingerprint"], "pinned_at": utc_now()}
+    ctx.keys.write_new(KeyStore.SIGNING_META, (json.dumps(meta, indent=2, sort_keys=True) + "\n").encode("ascii"))
+    ctx.log.event("signing_key_pinned", key_id=key["key_id"], fingerprint=key["fingerprint"])
+    c.passed("TRUSTED SIGNING KEY PINNED: %s" % key["key_id"])
+    return 0
+
+
+def cmd_show_keys(ctx: "Context") -> int:
+    c = ctx.console
+    c.line("Key directory: %s" % ctx.keys.root)
+    if ctx.keys.exists(KeyStore.SIGNING_PUB):
+        key = ctx.keys.signing_key()
+        c.line("Pinned signing key : %s  fingerprint %s" % (key["key_id"], format_fingerprint(key["fingerprint"])))
+    else:
+        c.warn("No signing key pinned (run trust-signing-key).")
+    if ctx.keys.exists(KeyStore.IDENTITY):
+        c.line("Transport recipient: %s" % ctx.keys.recipient())
+    else:
+        c.warn("No transport identity (run init-transport-key).")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Commands: status
 # ---------------------------------------------------------------------------
 
@@ -3031,6 +3914,8 @@ def cmd_status(ctx: Context) -> int:
         c.line("Session     : none. Next step: insert ONLY the dirty USB and run 'ingest'.")
         return 0
     c.line("Session     : %s  phase %s%s" % (session["run_id"], session["phase"], "  (simulation)" if session.get("simulated") else ""))
+    c.line("Mode        : %s" % session.get("mode", "%s (V1.0.0 session)" % MODE_LEGACY))
+    c.line("Gates       : %s" % (", ".join(gates_passed(session)) or "none"))
     approved = sum(1 for f in session["files"] if f.get("approved"))
     c.line("Files       : %d quarantined, %d approved, %d rejected" % (
         len(session["files"]), approved, session.get("scan", {}).get("rejected", len(session["rejected"]))))
@@ -3064,6 +3949,21 @@ def cmd_ingest(ctx: Context) -> int:
                                 "over with: ingest --new-session" % (existing["run_id"], existing["phase"]))
         ctx.store.archive_session(existing)
         c.info("Previous session %s archived and its quarantine removed." % existing["run_id"])
+    legacy = bool(ctx.arg("legacy"))
+    if legacy:
+        c.warn("LEGACY MODE (V1.0 behaviour): NO SOURCE AUTHENTICATION. Files are trusted only through optional "
+               "operator hashes. This is not equivalent to the authenticated V1.1 signed-manifest transfer.")
+        if ctx.arg("trusted_hashes") is None and ctx.config["require_trusted_hashes"]:
+            c.info("require_trusted_hashes is set: every released file will need a trusted hash.")
+    else:
+        if ctx.arg("trusted_hashes"):
+            raise ConfigError("--trusted-hashes belongs to --legacy mode; authenticated transfers use the signed manifest")
+        ctx.keys.signing_key()
+        ctx.keys.identity_path()
+        for tool in ("minisign", "age"):
+            if find_tool(tool) is None:
+                raise ToolMissing(tool)
+        c.passed("AUTHENTICATED MODE: pinned signing key and local transport identity present.")
     if ctx.arg("offline_lockdown"):
         do_network_lockdown(ctx, bool(ctx.arg("with_firewall")))
     net = ctx.backend.network_state()
@@ -3076,8 +3976,11 @@ def cmd_ingest(ctx: Context) -> int:
     ctx.log.event("ingest_start", run_id=session["run_id"], simulated=session["simulated"])
     try:
         try:
-            scan = _ingest_device_and_scan(ctx, session)
-            _ingest_finish(ctx, session, scan)
+            result = _ingest_device_and_scan(ctx, session)
+            if session["mode"] == MODE_AUTHENTICATED:
+                _ingest_finish_authenticated(ctx, session, result)
+            else:
+                _ingest_finish(ctx, session, result)
         except OSError as exc:
             raise BlockingError("IO_ERROR", "unexpected I/O error during ingest: %s" % display_text(exc, 300))
     except BlockingError as exc:
@@ -3100,7 +4003,7 @@ def cmd_ingest(ctx: Context) -> int:
     return 0
 
 
-def _ingest_device_and_scan(ctx: Context, session: Dict[str, Any]) -> ScanResult:
+def _ingest_device_and_scan(ctx: Context, session: Dict[str, Any]) -> Any:
     c = ctx.console
     disk = wait_for_single_removable(ctx, "Insert ONLY the DIRTY USB now, then press Enter (q to stop): ")
     if disk.tran != "usb":
@@ -3123,18 +4026,22 @@ def _ingest_device_and_scan(ctx: Context, session: Dict[str, Any]) -> ScanResult
     ctx.log.event("source_confirmed", identity=identity, partition=part.kname, fstype=part.fstype)
 
     session["source"]["automount_events"] = handle_existing_mounts(ctx, session, disk, "source")
+    if session["mode"] == MODE_AUTHENTICATED:
+        attached = [d.kname for d in attached_removable(*enumerate_devices(ctx))]
+        if ctx.backend.path_on_devices(str(ctx.keys.root), attached):
+            raise BlockingError("KEYS_ON_REMOVABLE_MEDIA", "the key directory lies on attached removable media")
     ctx.backend.ensure_privilege(c)
     disk, part = revalidate(ctx, identity, part.kname, part_identity)
     ro_ok, ro_details = ctx.backend.set_readonly(disk)
     session["source"]["block_readonly"] = {"verified": ro_ok, "details": ro_details}
-    if ro_ok:
-        c.passed("BLOCK DEVICE SET READ-ONLY (verified at the Linux block layer)")
-    else:
-        c.warn("The block device could NOT be verified read-only at the block layer.")
-        add_warning(session, "BLOCK_READONLY_UNVERIFIED", "blockdev --setro could not be verified")
-        c.confirm_phrase("PROCEED", "The filesystem will still be mounted read-only, but the block-layer "
-                                    "protection is missing.")
+    if not ro_ok:
+        # V1.1: no override. Block-layer read-only is a precondition for ingest.
+        ctx.log.event("block_readonly", result="FAIL", details=ro_details)
+        raise BlockingError("BLOCK_READONLY_FAILED", "the incoming device could not be set and verified read-only "
+                            "at the block layer. Ingest refused (there is no override).")
+    c.passed("BLOCK DEVICE SET READ-ONLY (verified at the Linux block layer)")
     disk, part = revalidate(ctx, identity, part.kname, part_identity)
+    verify_block_readonly(ctx, disk, "before mount")
     kfstype, options = mount_options(part.fstype, "ro", ctx.uid, ctx.gid)
     target = prepare_mountpoint(ctx, "source")
     ensure_not_mounted(ctx, part)
@@ -3142,12 +4049,21 @@ def _ingest_device_and_scan(ctx: Context, session: Dict[str, Any]) -> ScanResult
     try:
         minfo = ctx.backend.verify_mount(part, root, expect_ro=True)
         session["source"]["mount"] = {"fstype": kfstype, "requested_options": options, "verified": minfo}
-        c.passed("SOURCE MOUNTED READ-ONLY (ro,nodev,nosuid,noexec)")
+        verify_block_readonly(ctx, disk, "after mount")
+        c.passed("SOURCE MOUNTED READ-ONLY (ro,nodev,nosuid,noexec; block device read-only)")
         ctx.store.save_session(session)
-        scan = scan_source_tree(root, ctx.config, ctx.backend.expected_root_dev(part),
-                                on_entry=lambda: ctx.backend.notify("scan_entry"))
+        if session["mode"] == MODE_AUTHENTICATED:
+            ctx.backend.notify("scan_entry")
+            scan = read_transfer_package(root, ctx.config, ctx.backend.expected_root_dev(part))
+        else:
+            if os.path.lexists(os.path.join(str(root), PACKAGE_DIR)):
+                raise BlockingError("AUTHENTICATED_PACKAGE_IN_LEGACY_MODE", "this USB carries a signed %s/ package; "
+                                    "ingest it in the default authenticated mode, not --legacy" % PACKAGE_DIR)
+            scan = scan_source_tree(root, ctx.config, ctx.backend.expected_root_dev(part),
+                                    on_entry=lambda: ctx.backend.notify("scan_entry"))
         ctx.backend.verify_mount(part, root, expect_ro=True)
-        revalidate(ctx, identity, part.kname, part_identity)
+        disk, _part = revalidate(ctx, identity, part.kname, part_identity)
+        verify_block_readonly(ctx, disk, "after reading")
     finally:
         ctx.backend.unmount_partition(part, target)
     if ctx.backend.mounts_of(part):
@@ -3184,7 +4100,10 @@ def _ingest_finish(ctx: Context, session: Dict[str, Any], scan: ScanResult) -> N
         if free < scan.total_bytes * 2 + 1024 * 1024:
             raise BlockingError("QUARANTINE_SPACE", "not enough space for quarantine in %s" % ctx.store.root)
     os.mkdir(qdir, 0o700)
+    pass_gate(ctx, session, GATE_INCOMING_QUARANTINED)
     write_quarantine(qdir, scan.accepted)
+    seal_quarantine(qdir)
+    pass_gate(ctx, session, GATE_STAGING_SEALED)
     fstype = ctx.backend.filesystem_type_of(qdir)
     session["quarantine"] = {"path": str(qdir), "filesystem": fstype,
                              "tmpfs": fstype in ("tmpfs", "ramfs")}
@@ -3205,6 +4124,46 @@ def _ingest_finish(ctx: Context, session: Dict[str, Any], scan: ScanResult) -> N
         counts = apply_trusted_hashes(session, hashes, meta)
         ctx.log.event("trusted_hashes_applied", meta=meta, counts=counts)
 
+    run_clamav(ctx, session, qdir)
+    session["phase"] = PHASE_INGESTED
+    ctx.store.save_session(session)
+    print_ingest_summary(ctx, session)
+
+
+def _ingest_finish_authenticated(ctx: Context, session: Dict[str, Any], pkg: Dict[str, Any]) -> None:
+    c = ctx.console
+    qdir = ctx.store.quarantine_dir(session["run_id"])
+    payload_size = len(pkg["files"][PKG_PAYLOAD])
+    if shutil.disk_usage(str(ctx.store.root)).free < payload_size * 3 + 1024 * 1024:
+        raise BlockingError("QUARANTINE_SPACE", "not enough space for staging in %s" % ctx.store.root)
+    os.mkdir(qdir, 0o700)
+    records = authenticate_and_stage(ctx, session, pkg, qdir)
+    source = session["source"]
+    now = utc_now()
+    auth = session["authenticated"]
+    for rec in records:
+        rec.pop("_data", None)
+        rec.update({"source_device_by_id": source.get("by_id_path", ""),
+                    "source_device_serial": display_text(source["identity"].get("serial", "")),
+                    "ingest_timestamp": now, "hash_status": HASH_MATCH, "approved": False, "approved_sha256": None,
+                    "clamav": "NOT_SCANNED",
+                    "trusted_hash": {"source": "signed_manifest", "path": None, "matched_by": "signed_manifest",
+                                     "expected": rec["sha256"], "signing_key_id": auth["signing_key_id"],
+                                     "transfer_id": auth["transfer_id"], "at": now}})
+    session["files"] = records
+    session["rejected"] = []
+    session["scan"] = {"entries_examined": 0, "limit_reached": False, "accepted": len(records), "rejected": 0,
+                       "rejected_listed": 0, "rejected_omitted": 0, "rejected_reason_counts": {},
+                       "total_bytes": sum(r["size"] for r in records),
+                       "other_root_entries_left_behind": pkg["other_root_entries"]}
+    if pkg["other_root_entries"]:
+        c.info("%d other entries on the USB outside %s/ were not read and stay behind."
+               % (pkg["other_root_entries"], PACKAGE_DIR))
+    fstype = ctx.backend.filesystem_type_of(qdir)
+    session["quarantine"] = {"path": str(qdir), "filesystem": fstype, "tmpfs": fstype in ("tmpfs", "ramfs")}
+    if fstype not in ("tmpfs", "ramfs", "simulated"):
+        c.warn("Staging is on %s, not tmpfs." % (fstype or "unknown"))
+        add_warning(session, "QUARANTINE_NOT_TMPFS", "quarantine filesystem: %s" % (fstype or "unknown"))
     run_clamav(ctx, session, qdir)
     session["phase"] = PHASE_INGESTED
     ctx.store.save_session(session)
@@ -3299,6 +4258,8 @@ def cmd_review(ctx: Context) -> int:
         raise BlockingError("WRONG_PHASE", "review is not possible in phase %s" % session["phase"])
     require_source_removed(ctx, session)
     trusted_path = ctx.arg("trusted_hashes")
+    if trusted_path and session.get("mode") == MODE_AUTHENTICATED:
+        raise ConfigError("--trusted-hashes belongs to --legacy mode; this transfer is covered by its signed manifest")
     if trusted_path:
         hashes, meta = load_trusted_hashes(ctx, trusted_path)
         counts = apply_trusted_hashes(session, hashes, meta)
@@ -3314,6 +4275,8 @@ def cmd_review(ctx: Context) -> int:
             print_file_detail(c, index, rec)
         return 0
     qdir = ctx.store.quarantine_dir(session["run_id"])
+    if session.get("mode") == MODE_AUTHENTICATED:
+        return _review_signed_set(ctx, session, qdir)
     require_trusted = ctx.config["require_trusted_hashes"]
     for index, rec in enumerate(session["files"], 1):
         print_file_detail(c, index, rec)
@@ -3372,6 +4335,32 @@ def cmd_review(ctx: Context) -> int:
     approved = sum(1 for f in session["files"] if f.get("approved"))
     c.line("")
     c.info("%d of %d files approved. Next: python3 airlock.py release" % (approved, len(session["files"])))
+    return 0
+
+
+def _review_signed_set(ctx: Context, session: Dict[str, Any], qdir: Path) -> int:
+    """A signed transfer moves as a whole: one decision for the complete set."""
+    c = ctx.console
+    auth = session["authenticated"]
+    c.line("Signed transfer %s from key %s: %d files." % (auth["transfer_id"], auth["signing_key_id"], len(session["files"])))
+    for index, rec in enumerate(session["files"], 1):
+        print_file_detail(c, index, rec)
+    if any(f["severity"] == SEV_BLOCKING for rec in session["files"] for f in rec["review_flags"]):
+        c.blocking("At least one file has a BLOCKING finding; the signed set cannot be approved.")
+        return 0
+    answer = c.ask("Type APPROVE to approve the complete signed transfer set (%d files), anything else stops: "
+                   % len(session["files"]))
+    if answer != "APPROVE":
+        c.info("Not approved; nothing released.")
+        return 0
+    for rec in session["files"]:
+        data = read_quarantine_file(qdir, rec, rec["sha256"])
+        rec["approved"] = True
+        rec["approved_sha256"] = sha256_hex(data)
+        rec["approved_at"] = utc_now()
+    ctx.log.event("signed_set_approved", transfer_id=auth["transfer_id"], files=len(session["files"]))
+    ctx.store.save_session(session)
+    c.passed("Signed transfer set approved. Next: python3 airlock.py release")
     return 0
 
 
@@ -3451,8 +4440,10 @@ class DestinationWriter:
         return "FILES/" + "/".join(parts)
 
     def write_meta(self, sub: str, name: str, data: bytes) -> str:
-        if sub not in ("MANIFEST", "REPORTS") or check_name_component(name):
+        if sub not in ("MANIFEST", "REPORTS", "ORIGINAL_SIGNED_MANIFEST") or check_name_component(name):
             raise BlockingError("PATH_TRAVERSAL", "invalid metadata path")
+        if sub not in self._fds:
+            self._fds[sub] = _mkdir_open(self._fds["."], sub)
         _write_new_file(self._fds[sub], name, data)
         return "%s/%s" % (sub, name)
 
@@ -3528,7 +4519,19 @@ def compare_inventory(expected: Dict[str, str], actual: Dict[str, str], anomalie
 
 
 def build_release_manifest(session: Dict[str, Any], approved: List[Dict[str, Any]], dest_paths: Dict[str, str]) -> Dict[str, Any]:
+    auth = session.get("authenticated") or {}
+    original = None
+    if session.get("mode") == MODE_AUTHENTICATED:
+        original = {"path": "ORIGINAL_SIGNED_MANIFEST/manifest.json", "signature": "ORIGINAL_SIGNED_MANIFEST/manifest.minisig",
+                    "sha256": auth.get("manifest_sha256"), "signing_key_id": auth.get("signing_key_id"),
+                    "signing_key_fingerprint_sha256": auth.get("signing_key_fingerprint"),
+                    "transfer_id": auth.get("transfer_id")}
     return {
+        "kind": "MX_FORWARD_INTEGRITY_MANIFEST",
+        "trust_note": ("Generated by the MX airlock host, which is not the source of trust. In authenticated mode the "
+                       "source of trust is ORIGINAL_SIGNED_MANIFEST, verified with the pinned Termux signing key."),
+        "mode": session.get("mode", MODE_LEGACY),
+        "original_signed_manifest": original,
         "application": {"name": APP_NAME, "version": APP_VERSION},
         "run_id": session["run_id"],
         "created_at": utc_now(),
@@ -3565,6 +4568,8 @@ def cmd_release(ctx: Context) -> int:
     approved = [f for f in session["files"] if f.get("approved")]
     if not approved:
         raise BlockingError("NOTHING_APPROVED", "no files are approved; run: python3 airlock.py review")
+    if session.get("mode") == MODE_AUTHENTICATED and len(approved) != len(session["files"]):
+        raise BlockingError("SIGNED_SET_INCOMPLETE", "a signed transfer is released only as a complete set")
     for rec in approved:
         if any(fl["severity"] == SEV_BLOCKING for fl in rec["review_flags"]):
             raise BlockingError("BLOCKING_FINDING", "%s has a blocking finding" % rec["relative_path_display"])
@@ -3573,6 +4578,8 @@ def cmd_release(ctx: Context) -> int:
         if ctx.config["require_trusted_hashes"] and rec["hash_status"] != HASH_MATCH:
             raise BlockingError("TRUSTED_HASH_REQUIRED", "%s has no trusted hash match" % rec["relative_path_display"])
     require_source_removed(ctx, session)
+    require_gate(session, GATE_STAGING_SEALED)
+    require_gate(session, GATE_INCOMING_REMOVED)
 
     qdir = ctx.store.quarantine_dir(session["run_id"])
     payloads: Dict[str, bytes] = {}
@@ -3592,6 +4599,7 @@ def cmd_release(ctx: Context) -> int:
 
     attempt: Dict[str, Any] = {"started_at": utc_now(), "result": "IN_PROGRESS"}
     session["release_attempts"].append(attempt)
+    reset_release_gates(session)
     ctx.store.save_session(session)
     try:
         try:
@@ -3617,11 +4625,13 @@ def cmd_release(ctx: Context) -> int:
     attempt["result"] = "VERIFIED"
     session["release"] = result
     session["verification"] = result["verification"]
+    pass_gate(ctx, session, GATE_COMPLETE)
     session["phase"] = PHASE_RELEASED
     ctx.store.save_session(session)
     write_local_reports(ctx, session)
     c.heading("REMOVE CLEAN USB NOW")
-    c.passed("DESTINATION HASH MATCH VERIFIED for %d files in %s." % (len(approved), result["transfer_dir"]))
+    c.passed("DESTINATION HASH MATCH VERIFIED for %d files in %s; WHOLE DESTINATION FILESYSTEM VERIFIED "
+             "(no other content)." % (len(approved), result["transfer_dir"]))
     c.info("The clean USB is unmounted and can be removed. Local report: %s" % (ctx.store.root / "reports"))
     return 0
 
@@ -3676,13 +4686,54 @@ def _release_to_destination(ctx: Context, session: Dict[str, Any], approved: Lis
     writer = DestinationWriter(root, ctx.config["destination_dir_name"], session["run_id"])
     expected: Dict[str, str] = {}
     dest_paths: Dict[str, str] = {}
+    fstype = part.fstype
+    qdir = ctx.store.quarantine_dir(session["run_id"])
     try:
         attempt["mount_rw"] = ctx.backend.verify_mount(part, root, expect_ro=False)
         c.passed("DESTINATION MOUNTED (rw,nodev,nosuid,noexec)")
+        # Clean-state policy: the whole filesystem must be empty apart from documented metadata.
+        pre = whole_fs_inventory(root, [], 0)
+        contamination, _ = destination_findings(pre, {}, fstype)
+        attempt["destination"]["preexisting_entries"] = contamination[:50]
+        if contamination:
+            ctx.log.event("destination_clean_check", result="NOT_CLEAN", entries=contamination[:50])
+            for item in contamination[:20]:
+                c.blocking(item)
+            raise BlockingError("DESTINATION_NOT_CLEAN", "the destination is not empty/clean according to policy "
+                                "(%d unexpected entries). Nothing was written or deleted. Erase it deliberately with "
+                                "prepare-clean-usb, or use another drive." % len(contamination))
+        ctx.log.event("destination_clean_check", result="CLEAN")
+        pass_gate(ctx, session, GATE_DESTINATION_CLEAN)
         total = sum(len(v) for v in payloads.values())
         if shutil.disk_usage(str(root)).free < total + 4 * 1024 * 1024:
             raise BlockingError("DESTINATION_SPACE", "not enough free space on the destination")
-        attempt["destination"]["preexisting_root_entries"] = _inspect_destination_root(c, root)
+        # Re-verify staging immediately before export (every SHA-256, and the signature in authenticated mode).
+        for rec in approved:
+            payloads[rec["relative_path"]] = read_quarantine_file(qdir, rec, rec["approved_sha256"])
+        signed_meta: List[Tuple[str, bytes]] = []
+        if session.get("mode") == MODE_AUTHENTICATED:
+            auth = session["authenticated"]
+            key = ctx.keys.signing_key()
+            if key["key_id"] != auth["signing_key_id"] or key["fingerprint"] != auth["signing_key_fingerprint"]:
+                raise BlockingError("SIGNING_KEY_CHANGED", "the pinned signing key changed since ingest")
+            manifest_raw = read_quarantine_meta(qdir, QUARANTINE_PKG_FILES[PKG_MANIFEST], auth["manifest_sha256"],
+                                                PACKAGE_SIZE_LIMITS[PKG_MANIFEST])
+            sig_raw = read_quarantine_meta(qdir, QUARANTINE_PKG_FILES[PKG_SIGNATURE], auth["signature_sha256"],
+                                           PACKAGE_SIZE_LIMITS[PKG_SIGNATURE])
+            verify_signature(ctx, key, qdir / QUARANTINE_PKG_FILES[PKG_MANIFEST],
+                             qdir / QUARANTINE_PKG_FILES[PKG_SIGNATURE], sig_raw)
+            signed = validate_signed_manifest(manifest_raw, ctx.config)
+            if {f["relative_path"]: f["sha256"] for f in signed["files"]} != \
+                    {r["relative_path"]: r["approved_sha256"] for r in approved}:
+                raise BlockingError("QUARANTINE_TAMPERED", "staged set no longer equals the signed manifest")
+            key_note = ("Signing key ID: %s\nSHA-256 fingerprint of the Ed25519 public key: %s\nTransfer: %s\n"
+                        "Verify manifest.json with minisign and the pinned public key you obtained from the trusted\n"
+                        "Termux device, never with a key shipped on this USB.\n"
+                        % (key["key_id"], format_fingerprint(key["fingerprint"]), auth["transfer_id"]))
+            signed_meta = [("manifest.json", manifest_raw), ("manifest.minisig", sig_raw),
+                           ("SIGNING_KEY.txt", key_note.encode("ascii"))]
+        ctx.log.event("pre_export_reverification", result="PASS", files=len(approved))
+        pass_gate(ctx, session, GATE_PRE_EXPORT_REVERIFIED)
         writer.open()
         attempt["transfer_dir"] = writer.transfer_dir
         ctx.store.save_session(session)
@@ -3706,9 +4757,10 @@ def _release_to_destination(ctx: Context, session: Dict[str, Any], approved: Lis
                                              "re-hash); the result is in the local report and can be repeated with verify-clean")
         report_json = (json.dumps(report, indent=2, ensure_ascii=True) + "\n").encode("ascii")
         report_txt = render_report_text(report).encode("utf-8")
-        for sub, name, data in (("MANIFEST", "SHA256SUMS.txt", sums), ("MANIFEST", "manifest.json", manifest_bytes),
-                                ("REPORTS", "transfer-report.txt", report_txt),
-                                ("REPORTS", "transfer-report.json", report_json)):
+        metadata = [("MANIFEST", "SHA256SUMS.txt", sums), ("MANIFEST", "manifest.json", manifest_bytes),
+                    ("REPORTS", "transfer-report.txt", report_txt), ("REPORTS", "transfer-report.json", report_json)]
+        metadata += [("ORIGINAL_SIGNED_MANIFEST", name, data) for name, data in signed_meta]
+        for sub, name, data in metadata:
             expected[writer.write_meta(sub, name, data)] = sha256_hex(data)
         revalidate(ctx, identity, part.kname, part_identity)
     finally:
@@ -3721,6 +4773,7 @@ def _release_to_destination(ctx: Context, session: Dict[str, Any], approved: Lis
         raise BlockingError("UNMOUNT_FAILED", "destination is still mounted")
     ctx.backend.flush_buffers(part)
     c.passed("Files written, flushed, and destination unmounted.")
+    pass_gate(ctx, session, GATE_EXPORTED, transfer_dir=writer.transfer_dir)
     ctx.backend.notify("after_destination_write")
 
     # Re-read from the device through a fresh read-only mount.
@@ -3728,41 +4781,32 @@ def _release_to_destination(ctx: Context, session: Dict[str, Any], approved: Lis
     kfstype, ro_options = mount_options(part.fstype, "ro", ctx.uid, ctx.gid)
     ensure_not_mounted(ctx, part)
     root = ctx.backend.mount(part, kfstype, target, ro_options)
+    whole_expected = {"%s/%s" % (writer.transfer_dir, path): digest for path, digest in expected.items()}
     try:
         attempt["mount_verify"] = ctx.backend.verify_mount(part, root, expect_ro=True)
-        actual, anomalies = inventory_tree(root, writer.transfer_dir, max(ctx.config["max_file_bytes"], 16 * 1024 * 1024))
+        inv = whole_fs_inventory(root, whole_expected, max(ctx.config["max_file_bytes"], 16 * 1024 * 1024))
     finally:
         ctx.backend.unmount_partition(part, target)
-    problems = compare_inventory(expected, actual, anomalies)
-    verification = {"at": utc_now(), "files_checked": len(expected), "problems": problems,
-                    "result": "PASS" if not problems else "MISMATCH"}
+    contamination, mismatches = destination_findings(inv, whole_expected, fstype)
+    problems = contamination + mismatches
+    verification = {"at": utc_now(), "files_checked": len(expected), "whole_filesystem_entries": len(inv.files) + len(inv.dirs),
+                    "contamination": contamination, "problems": problems,
+                    "result": "PASS" if not problems else ("CONTAMINATED" if contamination else "MISMATCH")}
     attempt["verification"] = verification
+    ctx.log.event("destination_whole_fs_verification", result=verification["result"],
+                  unexpected=contamination[:50], mismatches=mismatches[:50])
     if problems:
         for p in problems:
             c.blocking(p)
+        if contamination:
+            raise BlockingError("DESTINATION_CONTAMINATION", "unauthorized content found on the destination "
+                                "(%d entries). The transfer is NOT complete." % len(contamination))
         raise BlockingError("DESTINATION_VERIFICATION_MISMATCH",
                             "destination contents do not match what was written (%d problems)" % len(problems))
+    pass_gate(ctx, session, GATE_DESTINATION_WHOLE_FS_VERIFIED, entries=len(inv.files) + len(inv.dirs))
     return {"transfer_dir": writer.transfer_dir, "destination": attempt["destination"],
             "files_written": sorted(expected), "expected_inventory": dict(sorted(expected.items())),
             "verification": verification, "completed_at": utc_now()}
-
-
-def _inspect_destination_root(c: Console, root: Path) -> List[str]:
-    try:
-        rfd = open_dir_nofollow(str(root))
-        try:
-            names = sorted(os.listdir(rfd))
-        finally:
-            os.close(rfd)
-    except OSError:
-        return []
-    ignore = {"system volume information", "lost+found"}
-    others = [n for n in names if n.lower() not in ignore]
-    if others:
-        c.warn("The destination already contains %d other entries; they are not copied, read or verified." % len(others))
-    if any(n.lower() in ("autorun.inf", "autorun.ini") for n in names):
-        c.warn("The destination contains an autorun file. Consider erasing it with prepare-clean-usb.")
-    return [display_text(n, 80) for n in others[:50]]
 
 
 # ---------------------------------------------------------------------------
@@ -3808,6 +4852,7 @@ def cmd_verify_clean(ctx: Context) -> int:
             raise BlockingError("NO_TRANSFER_DIRECTORY", "no %s directory found" % ctx.config["destination_dir_name"])
         problems_total = 0
         results = []
+        accounted: Dict[str, Optional[str]] = {}
         for tdir in dirs:
             actual, anomalies = inventory_tree(root, tdir, max(ctx.config["max_file_bytes"], 16 * 1024 * 1024))
             problems = list(anomalies)
@@ -3828,6 +4873,16 @@ def cmd_verify_clean(ctx: Context) -> int:
                     local = {"FILES/" + r["relative_path"]: r["sha256"] for r in session["files"] if r.get("approved")}
                     problems += ["LOCAL SESSION: " + p for p in compare_inventory(local, files, [])]
                     trusted_source = "the local session manifest and the USB's SHA256SUMS.txt"
+            if session and session.get("release") and session["release"]["transfer_dir"] == tdir \
+                    and session["release"].get("expected_inventory"):
+                accounted_rel = set(session["release"]["expected_inventory"])
+            else:
+                accounted_rel = set(usb_sums.named if usb_sums else {}) | KNOWN_TRANSFER_METADATA
+            accounted.update({"%s/%s" % (tdir, rel): None for rel in accounted_rel if rel in actual})
+            if session and session.get("mode") == MODE_AUTHENTICATED and session.get("release") \
+                    and session["release"]["transfer_dir"] == tdir:
+                problems += _verify_forwarded_signature(ctx, root, tdir, actual)
+                trusted_source += ", and the forwarded signed manifest checked with the pinned signing key"
             results.append({"transfer_dir": tdir, "problems": problems, "compared_against": trusted_source})
             problems_total += len(problems)
             if problems:
@@ -3836,6 +4891,17 @@ def cmd_verify_clean(ctx: Context) -> int:
             else:
                 c.passed("DESTINATION HASH MATCH VERIFIED: %s (%d files, compared against %s)"
                          % (display_text(tdir), len(files), trusted_source))
+        # Whole-filesystem check: nothing may exist outside the verified transfer directories.
+        inv = whole_fs_inventory(root, [], 0)
+        contamination, _ = destination_findings(inv, accounted, part.fstype)
+        ctx.log.event("verify_clean_whole_fs", result="PASS" if not contamination else "CONTAMINATED",
+                      unexpected=contamination[:50])
+        for item in contamination:
+            c.blocking("DESTINATION_CONTAMINATION: %s" % item)
+        problems_total += len(contamination)
+        results.append({"whole_filesystem": True, "problems": contamination})
+        if not contamination:
+            c.passed("WHOLE DESTINATION FILESYSTEM VERIFIED: no content outside %s" % ", ".join(display_text(d) for d in dirs))
     finally:
         ctx.backend.unmount_partition(part, target)
     if session is not None:
@@ -3845,6 +4911,56 @@ def cmd_verify_clean(ctx: Context) -> int:
         raise BlockingError("DESTINATION_VERIFICATION_MISMATCH", "clean USB verification found %d problems" % problems_total)
     c.info("Clean USB unmounted; it can be removed.")
     return 0
+
+
+KNOWN_TRANSFER_METADATA = frozenset({
+    "MANIFEST/SHA256SUMS.txt", "MANIFEST/manifest.json", "REPORTS/transfer-report.txt", "REPORTS/transfer-report.json",
+    "ORIGINAL_SIGNED_MANIFEST/manifest.json", "ORIGINAL_SIGNED_MANIFEST/manifest.minisig",
+    "ORIGINAL_SIGNED_MANIFEST/SIGNING_KEY.txt"})
+
+
+def _read_dest_file(root: Path, parts: Sequence[str], limit: int) -> Optional[bytes]:
+    """Read one file below root without following links; None if absent or not a plain file."""
+    fds: List[int] = []
+    try:
+        fds.append(open_dir_nofollow(str(root)))
+        for part in parts[:-1]:
+            fds.append(open_dir_nofollow(part, dir_fd=fds[-1]))
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=fds[-1])
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return None
+            data = read_bounded(fd, limit + 1)
+        finally:
+            os.close(fd)
+        return data if len(data) <= limit else None
+    except OSError:
+        return None
+    finally:
+        for fd in reversed(fds):
+            os.close(fd)
+
+
+def _verify_forwarded_signature(ctx: Context, root: Path, tdir: str, actual: Dict[str, str]) -> List[str]:
+    """Check ORIGINAL_SIGNED_MANIFEST on the clean USB with the pinned key, and FILES against it."""
+    manifest_raw = _read_dest_file(root, [tdir, "ORIGINAL_SIGNED_MANIFEST", "manifest.json"], PACKAGE_SIZE_LIMITS[PKG_MANIFEST])
+    sig_raw = _read_dest_file(root, [tdir, "ORIGINAL_SIGNED_MANIFEST", "manifest.minisig"], PACKAGE_SIZE_LIMITS[PKG_SIGNATURE])
+    if manifest_raw is None or sig_raw is None:
+        return ["ORIGINAL_SIGNED_MANIFEST missing or unreadable"]
+    work = Path(tempfile.mkdtemp(prefix="verify-", dir=str(ctx.store.root)))
+    try:
+        (work / "manifest.json").write_bytes(manifest_raw)
+        (work / "manifest.minisig").write_bytes(sig_raw)
+        try:
+            verify_signature(ctx, ctx.keys.signing_key(), work / "manifest.json", work / "manifest.minisig", sig_raw)
+            signed = validate_signed_manifest(manifest_raw, ctx.config)
+        except BlockingError as exc:
+            return ["ORIGINAL SIGNED MANIFEST: %s: %s" % (exc.code, exc)]
+    finally:
+        shutil.rmtree(str(work), ignore_errors=True)
+    expected = {"FILES/" + f["relative_path"]: f["sha256"] for f in signed["files"]}
+    files = {k: v for k, v in actual.items() if k.startswith("FILES/")}
+    return ["SIGNED MANIFEST: " + p for p in compare_inventory(expected, files, [])]
 
 
 def _read_usb_sums(root: Path, tdir: str) -> Optional[HashList]:
@@ -3924,6 +5040,9 @@ def build_report(session: Dict[str, Any]) -> Dict[str, Any]:
         "started_at": session.get("created_at"),
         "last_updated_at": session.get("updated_at"),
         "phase": session.get("phase"),
+        "mode": session.get("mode", MODE_LEGACY),
+        "authenticated": session.get("authenticated") or {},
+        "gates": gates_passed(session),
         "environment": session.get("environment"),
         "network": session.get("network"),
         "source": session.get("source"),
@@ -3955,6 +5074,14 @@ def render_report_text(report: Dict[str, Any]) -> str:
     add("Application     : %s %s" % (APP_NAME, APP_VERSION))
     add("Run ID          : %s%s" % (report["run_id"], "  (SIMULATION)" if report.get("simulated") else ""))
     add("Phase           : %s" % report.get("phase"))
+    add("Mode            : %s" % report.get("mode"))
+    auth = report.get("authenticated") or {}
+    if auth:
+        add("Transfer ID     : %s" % auth.get("transfer_id"))
+        add("Signing key     : %s  fingerprint %s" % (auth.get("signing_key_id"),
+                                                       format_fingerprint(auth.get("signing_key_fingerprint") or "")))
+        add("Signed manifest : sha256 %s" % auth.get("manifest_sha256"))
+    add("Gates passed    : %s" % (", ".join(report.get("gates") or []) or "none"))
     add("Started         : %s" % report.get("started_at"))
     add("Report generated: %s" % report.get("generated_at"))
     add("")
@@ -4081,7 +5208,7 @@ def write_local_reports(ctx: Context, session: Dict[str, Any]) -> Tuple[Path, Pa
 
 
 def cmd_report(ctx: Context) -> int:
-    session = load_session_checked(ctx)
+    session = load_session_checked(ctx, allow_v1_0=True)
     txt, js = write_local_reports(ctx, session)
     ctx.console.line(render_report_text(build_report(session)))
     ctx.console.info("Reports written: %s and %s" % (txt, js))
@@ -4122,7 +5249,7 @@ def cmd_network_restore(ctx: Context) -> int:
 
 def cmd_discard_session(ctx: Context) -> int:
     c = ctx.console
-    session = load_session_checked(ctx)
+    session = load_session_checked(ctx, allow_v1_0=True)
     c.confirm_phrase("DISCARD", "Discard session %s and delete its quarantined files?" % session["run_id"])
     ctx.store.archive_session(session)
     c.passed("Session archived and quarantine removed.")
@@ -4144,6 +5271,9 @@ COMMANDS: Dict[str, Callable[[Context], int]] = {
     "network-lockdown": cmd_network_lockdown,
     "network-restore": cmd_network_restore,
     "discard-session": cmd_discard_session,
+    "init-transport-key": cmd_init_transport_key,
+    "trust-signing-key": cmd_trust_signing_key,
+    "show-keys": cmd_show_keys,
 }
 
 
@@ -4156,12 +5286,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-dir", help="private state/quarantine directory (default: tmpfs under XDG_RUNTIME_DIR or /dev/shm)")
     parser.add_argument("--config", help="inert JSON configuration file (see config.example.json)")
     parser.add_argument("--simulate", metavar="SCENARIO_JSON", help="practice mode with simulated devices (no real device access)")
+    parser.add_argument("--keys-dir", help="private key directory (default: ~/.config/mx_usb_airlock/keys); never on a transport USB")
     parser.add_argument("--live-device", action="append", default=[], metavar="BY_ID_PATH",
                         help="declare /dev/disk/by-id/... as live boot media so it is never selectable (repeatable)")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status", help="show environment, devices and session state (read-only)")
-    p = sub.add_parser("ingest", help="PHASE A: read-only ingest of the dirty USB into quarantine")
-    p.add_argument("--trusted-hashes", help="operator-created trusted SHA-256 list (sha256sum text or JSON), NOT from the dirty USB")
+    p = sub.add_parser("ingest", help="PHASE A: authenticate, decrypt and stage a signed transfer package (default)")
+    p.add_argument("--legacy", action="store_true",
+                   help="V1.0 UNAUTHENTICATED mode: allowlisted plain files, trust only via optional operator hashes")
+    p.add_argument("--trusted-hashes", help="--legacy only: operator-created trusted SHA-256 list, NOT from the dirty USB")
     p.add_argument("--new-session", action="store_true", help="discard an unfinished session and start over")
     p.add_argument("--offline-lockdown", action="store_true", help="reversibly disable networking first")
     p.add_argument("--with-firewall", action="store_true", help="with --offline-lockdown: also add a temporary nftables drop policy")
@@ -4178,6 +5311,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--with-firewall", action="store_true")
     sub.add_parser("network-restore", help="restore networking saved by a lockdown")
     sub.add_parser("discard-session", help="archive the current session and delete its quarantine")
+    p = sub.add_parser("init-transport-key", help="create this machine's age identity for transport decryption")
+    p.add_argument("--replace", action="store_true", help="deliberately replace an existing identity")
+    p = sub.add_parser("trust-signing-key", help="pin the Termux signing PUBLIC key (fingerprint confirmation)")
+    p.add_argument("--public-key", help="minisign public key file")
+    p.add_argument("--public-key-string", help="minisign public key (base64 line)")
+    p.add_argument("--replace", action="store_true", help="deliberately replace the pinned key")
+    sub.add_parser("show-keys", help="show the pinned signing key and the transport recipient")
     return parser
 
 
@@ -4224,7 +5364,8 @@ def main(argv: Optional[List[str]] = None, console: Optional[Console] = None, ba
         store = StateStore(Path(args.state_dir) if args.state_dir else StateStore.default_root(backend.simulated))
         store.ensure()
         live = resolve_live_devices(args.live_device) if not backend.simulated else set()
-        ctx = Context(console, backend, config, store, args, live)
+        keys = KeyStore(Path(args.keys_dir) if args.keys_dir else KeyStore.default_root())
+        ctx = Context(console, backend, config, store, args, live, keys=keys)
         return COMMANDS[args.command](ctx)
     except BlockingError as exc:
         console.blocking("%s: %s" % (exc.code, exc))

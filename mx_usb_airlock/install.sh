@@ -22,11 +22,11 @@ LC_ALL=C
 export LC_ALL
 
 APP=mx_usb_airlock
-VERSION=1.0.0
+VERSION=1.1.0
 LAUNCHER_NAME=mx-usb-airlock
 MARKER="# mx_usb_airlock launcher - managed by install.sh"
 INSTALL_MARKER=.installed-by-mx_usb_airlock
-PAYLOAD="airlock.py config.example.json README.md SECURITY_MODEL.md RECOVERY.md TESTING.md LICENSE install.sh tests/test_airlock.py tests/test_install.py tests/test_integration_destructive.py"
+PAYLOAD="airlock.py config.example.json README.md SECURITY_MODEL.md RECOVERY.md TESTING.md LICENSE install.sh tests/test_airlock.py tests/test_install.py tests/test_integration_destructive.py tests/test_v11.py termux/usb_airlock_prepare.py"
 
 info() { printf '[INFO] %s\n' "$*"; }
 pass() { printf '[PASS] %s\n' "$*"; }
@@ -213,6 +213,15 @@ if [ -n "$MISSING" ]; then
     die "required tools missing:$MISSING (on MX/Debian they come from util-linux, mount and sudo; nothing was installed)"
 fi
 pass "Required tools present: lsblk mount umount blockdev"
+AUTH_MISSING=""
+for t in minisign age age-keygen; do
+    have_tool "$t" || AUTH_MISSING="$AUTH_MISSING $t"
+done
+if [ -n "$AUTH_MISSING" ]; then
+    warn "Authenticated V1.1 transfers (the default) need:$AUTH_MISSING. On MX/Debian: sudo apt install minisign age (no upgrade; nothing was installed by this script). Only 'ingest --legacy' works without them."
+else
+    pass "Authenticated-transfer tools present: minisign age age-keygen"
+fi
 OPTIONAL_MISSING=""
 for t in udevadm ip rfkill nft clamscan wipefs sfdisk mkfs.vfat; do
     have_tool "$t" || OPTIONAL_MISSING="$OPTIONAL_MISSING $t"
@@ -273,7 +282,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
-mkdir -m 0755 -- "$STAGE/tests"
+mkdir -m 0755 -- "$STAGE/tests" "$STAGE/termux"
 for f in $PAYLOAD SHA256SUMS; do
     install -m 0644 -- "$SRC_DIR/$f" "$STAGE/$f"
 done

@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Simulation-mode tests for the MX USB transfer airlock.
 
+V1.1 note: ingest defaults to the AUTHENTICATED signed-package mode.  The
+V1.0 behaviour these tests cover is now the explicit "ingest --legacy" mode,
+so they invoke it with --legacy (intentional policy change, not a weakened
+test).  V1.1 behaviour is tested in test_v11_*.py.
+
 No test here touches a real block device.  Devices are simulated and their
 "filesystems" are temporary directories.  Run with:
 
@@ -129,7 +134,7 @@ class Harness:
 
     def ingest(self, extra_args=(), extra_rules=()):
         self.insert_source()
-        return self.run(["ingest"] + list(extra_args), self.ingest_rules(extra_rules))
+        return self.run(["ingest", "--legacy"] + list(extra_args), self.ingest_rules(extra_rules))
 
     def approve_all(self):
         return self.run(["review"], [("Approve file", "a"), ("Type APPROVE", "APPROVE")])
@@ -581,16 +586,18 @@ class WorkflowTests(unittest.TestCase):
             self.assertNotIn(b"TOP SECRET", q.read_bytes())
 
     def test_symlink_destination_not_followed(self):
+        # V1.1 policy change: any pre-existing entry on the destination (here a planted symlink)
+        # stops the release before anything is written; V1.0 wrote into an alternative directory.
         h = self.h
         h.put("good.ps1", PS1_BENIGN)
         os.symlink(str(h.outside), str(h.dst / "RECOVERY_TRANSFER"))
         self.assertEqual(h.ingest(), 0)
         h.approve_all()
-        self.assertEqual(h.release(), 0, h.output())
+        self.assertEqual(h.release(), 1)
+        self.assertIn("DESTINATION_NOT_CLEAN", h.output())
         self.assertEqual(list(h.outside.iterdir()), [])
-        tdir = h.session()["release"]["transfer_dir"]
-        self.assertTrue(tdir.startswith("RECOVERY_TRANSFER_"))
-        self.assertTrue((h.dst / tdir / "FILES" / "good.ps1").is_file())
+        self.assertEqual(sorted(p.name for p in h.dst.iterdir()), ["RECOVERY_TRANSFER"])
+        self.assertTrue((h.dst / "RECOVERY_TRANSFER").is_symlink())
 
     def test_destination_writer_path_safety(self):
         h = self.h
@@ -631,7 +638,7 @@ class WorkflowTests(unittest.TestCase):
         h.put("good.ps1", PS1_BENIGN)
         h.insert_source()
         h.insert_dest()
-        self.assertEqual(h.run(["ingest"], h.ingest_rules()), 1)
+        self.assertEqual(h.run(["ingest", "--legacy"], h.ingest_rules()), 1)
         self.assertIn("MULTIPLE_REMOVABLE_DEVICES", h.output())
         self.assertEqual(h.mount_calls(), [])
         self.assertEqual(h.session()["phase"], A.PHASE_BLOCKED)
@@ -656,7 +663,7 @@ class WorkflowTests(unittest.TestCase):
         h.insert_source()
         rules = [("Type YES", "YES"), ("then type REMOVED", "REMOVED", "once"),
                  ("then type REMOVED", "q")]
-        self.assertEqual(h.run(["ingest"], rules), 2)
+        self.assertEqual(h.run(["ingest", "--legacy"], rules), 2)
         self.assertIn("DIRTY USB STILL DETECTED", h.output())
         self.assertEqual(h.session()["phase"], A.PHASE_INGESTED)
         # review (and therefore approval) must not proceed while the source is attached
@@ -726,7 +733,7 @@ class WorkflowTests(unittest.TestCase):
         h.backend.auto = corrupt
         self.assertEqual(h.release(), 1)
         self.assertIn("DESTINATION_VERIFICATION_MISMATCH", h.output())
-        self.assertIn("HASH MISMATCH FILES/a.ps1", h.output())
+        self.assertIn("HASH MISMATCH RECOVERY_TRANSFER/FILES/a.ps1", h.output())  # V1.1 whole-filesystem paths
         self.assertNotEqual(h.session()["phase"], A.PHASE_RELEASED)
 
     def test_destination_unexpected_extra_file_detected(self):
@@ -769,7 +776,7 @@ class WorkflowTests(unittest.TestCase):
         h = self.h
         h.put("a.ps1", PS1_BENIGN)
         h.insert_source(automount="rw")
-        self.assertEqual(h.run(["ingest"], h.ingest_rules([("Type CONTINUE", "CONTINUE")])), 0, h.output())
+        self.assertEqual(h.run(["ingest", "--legacy"], h.ingest_rules([("Type CONTINUE", "CONTINUE")])), 0, h.output())
         out = h.output()
         self.assertIn("MOUNTED READ-WRITE", out)
         self.assertIn("automount should ideally be disabled", out)
@@ -784,7 +791,7 @@ class WorkflowTests(unittest.TestCase):
         h = self.h
         h.put("a.ps1", PS1_BENIGN)
         h.insert_source(automount="rw")
-        self.assertEqual(h.run(["ingest"], h.ingest_rules([("Type CONTINUE", "stop")])), 2)
+        self.assertEqual(h.run(["ingest", "--legacy"], h.ingest_rules([("Type CONTINUE", "stop")])), 2)
         self.assertEqual(h.mount_calls(), [])
         self.assertEqual(h.session()["phase"], A.PHASE_CANCELLED)
 
@@ -880,7 +887,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("sdz", [d.kname for d in A.removable_disks(disks, protected)])
         self.assertNotIn("sda", [d.kname for d in A.removable_disks(disks, protected)])
         # with only protected disks present, ingest never offers them and waits for the dirty USB
-        self.assertEqual(h.run(["ingest"], [("Insert ONLY the DIRTY USB", "q")]), 2)
+        self.assertEqual(h.run(["ingest", "--legacy"], [("Insert ONLY the DIRTY USB", "q")]), 2)
         self.assertEqual(h.mount_calls(), [])
         self.assertEqual(h.run(["prepare-clean-usb"], [("Insert ONLY the USB drive to ERASE", "q")]), 2)
         self.assertTrue((h.outside).exists())
@@ -908,14 +915,14 @@ class WorkflowTests(unittest.TestCase):
                 result["sdb"] = "SYSTEM DISK (test)"
             return result
         h.backend.protected_disks = flip
-        self.assertEqual(h.run(["ingest"], h.ingest_rules()), 1)
+        self.assertEqual(h.run(["ingest", "--legacy"], h.ingest_rules()), 1)
         self.assertIn("PROTECTED_DEVICE", h.output())
 
     def test_operator_cancellation_at_identity(self):
         h = self.h
         h.put("a.ps1", PS1_BENIGN)
         h.insert_source()
-        self.assertEqual(h.run(["ingest"], [("Type YES", "no")]), 2)
+        self.assertEqual(h.run(["ingest", "--legacy"], [("Type YES", "no")]), 2)
         s = h.session()
         self.assertEqual(s["phase"], A.PHASE_CANCELLED)
         self.assertEqual(h.mount_calls(), [])
@@ -925,7 +932,7 @@ class WorkflowTests(unittest.TestCase):
         h = self.h
         h.put("a.ps1", PS1_BENIGN)
         h.insert_source()
-        self.assertEqual(h.run(["ingest"], []), 2)
+        self.assertEqual(h.run(["ingest", "--legacy"], []), 2)
         self.assertEqual(h.mount_calls(), [])
 
     def test_wrong_write_phrase_writes_nothing(self):
@@ -944,7 +951,7 @@ class WorkflowTests(unittest.TestCase):
         h.put("a.ps1", PS1_BENIGN)
         h.insert_source()
         console = A.Console(input_fn=lambda p: "YES", out=h.out, interactive=False, color=False)
-        rc = A.main(["--state-dir", str(h.state), "ingest"], console=console, backend=h.backend)
+        rc = A.main(["--state-dir", str(h.state), "ingest", "--legacy"], console=console, backend=h.backend)
         self.assertEqual(rc, 2)
         self.assertEqual(h.mount_calls(), [])
 
@@ -957,9 +964,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(h.release(), 1)
         self.assertIn("NOTHING_APPROVED", h.output())
         h.insert_source()
-        self.assertEqual(h.run(["ingest"], h.ingest_rules()), 1)
+        self.assertEqual(h.run(["ingest", "--legacy"], h.ingest_rules()), 1)
         self.assertIn("SESSION_ACTIVE", h.output())
-        self.assertEqual(h.run(["ingest", "--new-session"], h.ingest_rules()), 0, h.output())
+        self.assertEqual(h.run(["ingest", "--legacy", "--new-session"], h.ingest_rules()), 0, h.output())
 
     def test_quarantine_tamper_detected(self):
         h = self.h
@@ -994,22 +1001,24 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(h.ingest(), 0)
         s = h.session()
         qdir = A.StateStore(h.state).quarantine_dir(s["run_id"])
-        self.assertEqual(stat.S_IMODE(qdir.stat().st_mode), 0o700)
+        # V1.1: staging is sealed after verification (directory 0500, files 0400; V1.0 used 0700/0600).
+        self.assertEqual(stat.S_IMODE(qdir.stat().st_mode), 0o500)
         for q in qdir.iterdir():
             self.assertRegex(q.name, r"^f\d{6}\.dat$")
-            self.assertEqual(stat.S_IMODE(q.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(q.stat().st_mode), 0o400)
 
-    def test_block_readonly_failure_requires_decision(self):
+    def test_block_readonly_failure_is_a_hard_stop(self):
+        # V1.1 policy change: V1.0 allowed typing PROCEED when block-layer read-only could not be
+        # verified. That override is removed; there is no prompt and no way to continue.
         h = self.h
         h.put("a.ps1", PS1_BENIGN)
         h.backend.readonly_supported = False
         h.insert_source()
-        self.assertEqual(h.run(["ingest"], h.ingest_rules([("Type PROCEED", "nope")])), 2)
+        self.assertEqual(h.run(["ingest", "--legacy"], h.ingest_rules([("Type PROCEED", "PROCEED")])), 1)
+        self.assertIn("BLOCK_READONLY_FAILED", h.output())
+        self.assertFalse(any("PROCEED" in p for p in h.responder.prompts))
         self.assertEqual(h.mount_calls(), [])
-        h.backend.readonly_supported = False
-        self.assertEqual(h.run(["ingest", "--new-session"],
-                               h.ingest_rules([("Type PROCEED", "PROCEED")])), 0, h.output())
-        self.assertIn("BLOCK_READONLY_UNVERIFIED", {w["code"] for w in h.session()["warnings"]})
+        self.assertEqual(h.session()["phase"], A.PHASE_BLOCKED)
 
     def test_destination_read_only_or_without_serial_refused(self):
         h = self.h
@@ -1055,7 +1064,7 @@ class WorkflowTests(unittest.TestCase):
         h = self.h
         h.put("a.ps1", PS1_BENIGN)
         h.insert_source()
-        h.run(["ingest"], [("Type YES", "YES"), ("then type REMOVED", "q")])
+        h.run(["ingest", "--legacy"], [("Type YES", "YES"), ("then type REMOVED", "q")])
         self.assertEqual(h.session()["phase"], A.PHASE_INGESTED)
         h.remove("sdb")
         self.assertEqual(h.run(["prepare-clean-usb"], [("Insert ONLY", h.dest_insert_answer), ("Type ERASE", "ERASE 0001")]), 1)
@@ -1109,7 +1118,7 @@ class WorkflowTests(unittest.TestCase):
         h.backend.mounted["sde1"] = {"target": "/run/somewhere/boot", "ro": True, "options": ["ro"], "automount": False}
         disks, protected = A.enumerate_devices(A.Context(None, h.backend, A.load_config(None), A.StateStore(h.state), None))
         self.assertTrue(protected["sde"].startswith("IN USE"))
-        self.assertEqual(h.run(["ingest"], [("Insert ONLY the DIRTY USB", "q")]), 2)
+        self.assertEqual(h.run(["ingest", "--legacy"], [("Insert ONLY the DIRTY USB", "q")]), 2)
         self.assertEqual(h.mount_calls(), [])
 
     def test_release_refuses_preinserted_devices(self):
@@ -1287,7 +1296,7 @@ class PullRequestReviewRegressionTests(unittest.TestCase):
             return "REMOVED"
         rules = [("Type YES", "YES"), ("then type REMOVED", remount_instead_of_removing, "once"),
                  ("then type REMOVED", "q")]
-        self.assertEqual(h.run(["ingest"], rules), 2)
+        self.assertEqual(h.run(["ingest", "--legacy"], rules), 2)
         self.assertIn("DIRTY USB STILL DETECTED", h.output())
         self.assertEqual(h.session()["phase"], A.PHASE_INGESTED)
         self.assertIsNone(h.session()["source_removed_at"])

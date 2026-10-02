@@ -35,6 +35,20 @@ On a live session these changes are lost at reboot.
 | `OFFLINE_LOCKDOWN_INCOMPLETE` | The requested offline lockdown could not be confirmed: the network state is unknown, an interface could not be brought down, or interfaces or a default route are still active. Changes made so far are saved, so run `network-restore`, take the network down manually (unplug cables, switch radios off), and try again. |
 | `BUFFER_FLUSH_FAILED` | `blockdev --flushbufs` failed or is missing, so the read-back could not be trusted and no verification was claimed. Treat the clean USB as unverified and retry `release`. |
 | `STATE_TOO_LARGE` | The session state would exceed its size limit. Lower `max_scan_entries` or `max_files`, or remove clutter from the source, then start a new session. |
+| `NO_AUTHENTICATED_PACKAGE` | The USB has no `AIRLOCK_TRANSFER/` package. Prepare one on Termux. For a deliberate V1.0-style unauthenticated transfer, use `ingest --legacy`. |
+| `AUTHENTICATED_PACKAGE_IN_LEGACY_MODE` | You ran `--legacy` on a USB that carries a signed package. Run the default (authenticated) `ingest`. |
+| `NO_TRUSTED_SIGNING_KEY`, `NO_TRANSPORT_IDENTITY` | MX keys are not set up. Run `init-transport-key` and `trust-signing-key` (see README). |
+| `WRONG_SIGNING_KEY`, `SIGNATURE_INVALID`, `SIGNATURE_MALFORMED`, `SIGNATURE_BINDING_MISMATCH` | The package was not signed by the pinned Termux key, or was modified after signing. Treat it as hostile. Re-create it on Termux. If the signing key really changed, pin the new one deliberately with `trust-signing-key --replace`. |
+| `MANIFEST_MALFORMED`, `MANIFEST_UNSUPPORTED_VERSION`, `MANIFEST_DUPLICATE_PATH`, `TRANSFER_ID_MISMATCH`, `PACKAGE_STRUCTURE_INVALID` | The package is malformed, or comes from an incompatible version. Re-create it with the matching `usb_airlock_prepare`. |
+| `ENCRYPTED_PAYLOAD_MISMATCH` | `payload.age` is not the payload that was signed (modified, truncated or swapped). Re-copy the package from Termux. |
+| `DECRYPTION_FAILED` | The package was encrypted for a different MX recipient, or the ciphertext is damaged. Check `show-keys` on both sides. |
+| `DECRYPTED_FILE_MISMATCH`, `PAYLOAD_UNSAFE_MEMBER`, `PAYLOAD_UNEXPECTED_MEMBER`, `PAYLOAD_CONTAINER_INVALID` | The decrypted contents differ from the signed manifest. Nothing was staged. Re-create the package. |
+| `SIGNED_FILE_POLICY_VIOLATION` | A signed file breaks the content policy (for example a binary signature). The set moves as a whole, so nothing was staged. Fix the file set on Termux. |
+| `BLOCK_READONLY_FAILED`, `BLOCK_READONLY_LOST`, `MOUNT_OPTIONS_NOT_ENFORCED` | The required read-only protection could not be established or was lost. There is no override. Try another USB port or reader. Do not use a device that refuses read-only mode. |
+| `DESTINATION_NOT_CLEAN` | The clean USB is not empty. Nothing was written or deleted. Erase it deliberately with `prepare-clean-usb`, or use another drive. |
+| `DESTINATION_CONTAMINATION` | Unauthorized content appeared on the clean USB during export. Do not use it. Erase it with `prepare-clean-usb` and release again. Suspect the MX host. |
+| `SIGNING_KEY_CHANGED`, `SIGNED_SET_INCOMPLETE`, `ILLEGAL_TRANSITION` | The release preconditions changed or were skipped. Start a new session. |
+| `SESSION_FROM_V1_0` | A session created by V1.0.0 is still open. Run `ingest --new-session` or `discard-session`; its logs and reports are kept. |
 | `CONCURRENT_MOUNT` | Something (usually automount) mounted the drive again during the process. Disable automount and start the step again. |
 | `TRUSTED_HASH_MISMATCH` | A file does not match the hash you supplied. Treat it as tampered. Release stays blocked for this session. Get a known-good copy and start a new session. |
 | `TRUSTED_HASH_ON_REMOVABLE`, `TRUSTED_HASH_FROM_DIRTY_MEDIA` | The trusted hash file must be created or typed on the live system, not taken from the dirty USB or the quarantine. |
@@ -73,10 +87,17 @@ and disappears at reboot.
 
 ## Verifying on the Windows laptop
 
+With minisign for Windows and the public key file you copied from Termux
+yourself (never one from the USB):
+
 ```
+minisign -Vm .\RECOVERY_TRANSFER\ORIGINAL_SIGNED_MANIFEST\manifest.json -p C:\path\to\signing.pub
 Get-FileHash -Algorithm SHA256 .\RECOVERY_TRANSFER\FILES\*.ps1
-Get-Content .\RECOVERY_TRANSFER\MANIFEST\SHA256SUMS.txt
 ```
+
+Compare each hash with the `files` entries in the signed `manifest.json`.
+`MANIFEST\SHA256SUMS.txt` is the MX forward manifest: useful, but MX is not
+the source of trust.
 
 Compare against hashes you recorded independently whenever possible. Read the
 scripts before running them.

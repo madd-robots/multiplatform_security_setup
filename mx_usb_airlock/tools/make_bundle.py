@@ -28,14 +28,14 @@ ROOT = Path(__file__).resolve().parent.parent
 REPO = ROOT.parent
 # Fixed timestamp (2026-01-01T00:00:00Z) unless SOURCE_DATE_EPOCH is set.
 MTIME = int(os.environ.get("SOURCE_DATE_EPOCH", "1767225600"))
-EXECUTABLE = {"install.sh"}
+EXECUTABLE = {"install.sh", "termux/usb_airlock_prepare.py"}
 
 
 def payload_sources():
     sources = {}
     for name in ("airlock.py", "config.example.json", "README.md", "SECURITY_MODEL.md", "RECOVERY.md",
                  "TESTING.md", "install.sh", "tests/test_airlock.py", "tests/test_install.py",
-                 "tests/test_integration_destructive.py"):
+                 "tests/test_integration_destructive.py", "tests/test_v11.py", "termux/usb_airlock_prepare.py"):
         sources[name] = ROOT / name
     sources["LICENSE"] = REPO / "LICENSE"
     return sources
@@ -89,7 +89,7 @@ def build(out_dir, quiet=False):
 
     raw = io.BytesIO()
     with tarfile.open(fileobj=raw, mode="w", format=tarfile.USTAR_FORMAT) as tar:
-        for directory in (top, top + "/tests"):
+        for directory in (top, top + "/termux", top + "/tests"):
             tar.addfile(tar_entry(directory, 0, 0o755, is_dir=True))
         for name in sorted(files):
             data = files[name]

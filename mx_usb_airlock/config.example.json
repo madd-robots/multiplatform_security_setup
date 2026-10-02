@@ -1,6 +1,14 @@
 {
-  "_comment": "Inert JSON configuration. Unknown keys are rejected. Extensions on the built-in deny list (executables, scripts for other interpreters, archives, images, Office documents) cannot be added here.",
-  "allowed_extensions": ["ps1", "txt", "md", "json", "sha256", "sha256sum", "csv"],
+  "_comment": "Inert JSON configuration. Unknown keys are rejected. Extensions on the built-in deny list (executables, scripts for other interpreters, archives, images, Office documents) cannot be added here. max_transfer_payload_bytes limits the encrypted payload.age of an authenticated V1.1 package.",
+  "allowed_extensions": [
+    "ps1",
+    "txt",
+    "md",
+    "json",
+    "sha256",
+    "sha256sum",
+    "csv"
+  ],
   "max_file_bytes": 2097152,
   "max_total_bytes": 33554432,
   "max_files": 200,
@@ -11,5 +19,6 @@
   "require_trusted_hashes": false,
   "compute_sha512": true,
   "clamav_enabled": true,
-  "destination_dir_name": "RECOVERY_TRANSFER"
+  "destination_dir_name": "RECOVERY_TRANSFER",
+  "max_transfer_payload_bytes": 67108864
 }
