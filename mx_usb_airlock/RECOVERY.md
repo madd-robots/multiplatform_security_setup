@@ -31,6 +31,10 @@ On a live session these changes are lost at reboot.
 | `IDENTITY_UNCERTAIN` | The destination reports no usable serial number. Use a drive that does. |
 | `DESTINATION_READ_ONLY` | The drive is read-only at the block layer. It may be the dirty drive, which ingest set read-only. Unplug and check which drive it is. |
 | `UNSUPPORTED_FILESYSTEM` | Destination is not FAT32 or exFAT. Run `prepare-clean-usb` (this erases the drive) or format it on trusted equipment. |
+| `UNEXPECTED_REMOVABLE_DEVICE` | Another removable drive appeared while a device was being processed. This includes a drive that is mounted somewhere such as `/mnt`. The step stopped before going further. Remove the extra drive and repeat the step. If this happened during `release`, treat the clean USB's transfer directory as unverified. |
+| `OFFLINE_LOCKDOWN_INCOMPLETE` | The requested offline lockdown could not be confirmed: the network state is unknown, an interface could not be brought down, or interfaces or a default route are still active. Changes made so far are saved, so run `network-restore`, take the network down manually (unplug cables, switch radios off), and try again. |
+| `BUFFER_FLUSH_FAILED` | `blockdev --flushbufs` failed or is missing, so the read-back could not be trusted and no verification was claimed. Treat the clean USB as unverified and retry `release`. |
+| `STATE_TOO_LARGE` | The session state would exceed its size limit. Lower `max_scan_entries` or `max_files`, or remove clutter from the source, then start a new session. |
 | `CONCURRENT_MOUNT` | Something (usually automount) mounted the drive again during the process. Disable automount and start the step again. |
 | `TRUSTED_HASH_MISMATCH` | A file does not match the hash you supplied. Treat it as tampered. Release stays blocked for this session. Get a known-good copy and start a new session. |
 | `TRUSTED_HASH_ON_REMOVABLE`, `TRUSTED_HASH_FROM_DIRTY_MEDIA` | The trusted hash file must be created or typed on the live system, not taken from the dirty USB or the quarantine. |

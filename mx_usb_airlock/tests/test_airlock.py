@@ -17,6 +17,7 @@ import stat
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -1173,6 +1174,298 @@ class WorkflowTests(unittest.TestCase):
         h.insert_dest()
         self.assertEqual(h.run(["status"]), 0)
         self.assertIn("More than one removable storage device", h.output())
+
+
+class PullRequestReviewRegressionTests(unittest.TestCase):
+    """One or more regression tests per finding from the PR #3 review."""
+
+    def setUp(self):
+        self.h = Harness(self)
+
+    def mount_elsewhere(self, kname="sdb1", target="/mnt/dirty"):
+        self.h.backend.mounted[kname] = {"target": target, "ro": False, "options": ["rw"], "automount": False}
+
+    def ingest_and_approve(self):
+        h = self.h
+        h.put("a.ps1", PS1_BENIGN)
+        self.assertEqual(h.ingest(), 0, h.output())
+        self.assertEqual(h.approve_all(), 0, h.output())
+
+    # 1. revalidation rejects any additional removable disk
+    def test_f1_second_disk_inserted_during_ingest_scan_blocks(self):
+        h = self.h
+        h.put("a.ps1", PS1_BENIGN)
+
+        def insert_clean(be, event):
+            if event == "scan_entry" and "sdc" not in be.devices:
+                h.insert_dest()
+        h.backend.auto = insert_clean
+        self.assertEqual(h.ingest(), 1)
+        self.assertIn("UNEXPECTED_REMOVABLE_DEVICE", h.output())
+        s = h.session()
+        self.assertEqual(s["phase"], A.PHASE_BLOCKED)
+        self.assertNotIn("sdb1", h.backend.mounted)
+        self.assertFalse(A.StateStore(h.state).quarantine_dir(s["run_id"]).exists())
+
+    def test_f1_dirty_disk_reinserted_during_release_blocks(self):
+        h = self.h
+        self.ingest_and_approve()
+
+        def reinsert_dirty(be, event):
+            if event == "before_destination_write" and "sdb" not in be.devices:
+                h.insert_source()
+                self.mount_elsewhere()  # even when hidden as "IN USE" at /mnt
+        h.backend.auto = reinsert_dirty
+        self.assertEqual(h.release(), 1)
+        self.assertIn("UNEXPECTED_REMOVABLE_DEVICE", h.output())
+        self.assertEqual([p for p in h.dest_files() if "/FILES/" in p], [])
+        self.assertNotEqual(h.session()["phase"], A.PHASE_RELEASED)
+
+    # 2. --live-device partition links protect the whole disk
+    def test_f2_live_device_partition_link_protects_whole_disk(self):
+        root = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, str(root), True)
+        dev = root / "dev"
+        (dev / "disk" / "by-id").mkdir(parents=True)
+        (dev / "sdx").write_text("")
+        (dev / "sdx1").write_text("")
+        os.symlink("../../sdx1", str(dev / "disk" / "by-id" / "usb-Live_Stick_LIVE9-0:0-part1"))
+        os.symlink("../../sdx", str(dev / "disk" / "by-id" / "usb-Live_Stick_LIVE9-0:0"))
+        devices = root / "devices" / "usb" / "block" / "sdx"
+        (devices / "sdx1").mkdir(parents=True)
+        (devices / "sdx1" / "partition").write_text("1\n")
+        sysblock = root / "class"
+        sysblock.mkdir()
+        os.symlink(str(devices), str(sysblock / "sdx"))
+        os.symlink(str(devices / "sdx1"), str(sysblock / "sdx1"))
+        part_link = str(dev / "disk" / "by-id" / "usb-Live_Stick_LIVE9-0:0-part1")
+        disk_link = str(dev / "disk" / "by-id" / "usb-Live_Stick_LIVE9-0:0")
+        self.assertEqual(A.resolve_live_devices([part_link], str(dev), str(sysblock)), {"sdx"})
+        self.assertEqual(A.resolve_live_devices([disk_link], str(dev), str(sysblock)), {"sdx"})
+        with self.assertRaises(A.ConfigError):
+            A.resolve_live_devices([str(dev / "sdx1")], str(dev), str(sysblock))
+
+        # The resolved whole disk is never offered, including for prepare-clean-usb.
+        h = self.h
+        live = A.sim_disk("sdx", 20, "LIVE9", model="Live_Stick", vendor="Live")
+        (h.outside / "keep.txt").write_text("live system data")
+        h.backend.add_device(live, {"sdx1": h.outside})  # automatic live detection missed it
+        ctx = A.Context(None, h.backend, A.load_config(None), A.StateStore(h.state), None, {"sdx"})
+        disks, protected = A.enumerate_devices(ctx)
+        self.assertIn("sdx", protected)
+        self.assertEqual(A.removable_disks(disks, protected), [])
+        A.StateStore(h.state).ensure()
+        h.responder = Responder([("Insert ONLY the USB drive to ERASE", "q")])
+        ctx.console = A.Console(input_fn=h.responder, out=h.out, interactive=True, color=False)
+        ctx.args = None
+        with self.assertRaises(A.OperatorCancelled):
+            A.cmd_prepare_clean_usb(ctx)
+        self.assertFalse(any("ERASE" in p and "Type" in p for p in h.responder.prompts))
+        self.assertTrue((h.outside / "keep.txt").exists())
+
+    # 3. trusted-hash provenance covers removable disks mounted somewhere unusual
+    def test_f3_trusted_hashes_from_reinserted_dirty_usb_at_mnt_refused(self):
+        h = self.h
+        h.put("script.ps1", PS1_BENIGN)
+        self.assertEqual(h.ingest(), 0, h.output())
+        self.assertEqual(h.session()["phase"], A.PHASE_SOURCE_REMOVED)
+        (h.src / "evil_trusted.txt").write_text("%s  script.ps1\n" % A.sha256_hex(PS1_BENIGN))
+        h.insert_source()
+        self.mount_elsewhere()
+        self.assertEqual(h.run(["review", "--trusted-hashes", str(h.src / "evil_trusted.txt"), "--list"]), 1)
+        self.assertIn("TRUSTED_HASH_ON_REMOVABLE", h.output())
+        self.assertEqual(h.session()["files"][0]["hash_status"], A.HASH_NOT_PREAUTHORIZED)
+
+    # 4. source-removal check sees the source even when it is classified as protected
+    def test_f4_removal_not_recorded_while_source_mounted_elsewhere(self):
+        h = self.h
+        h.put("a.ps1", PS1_BENIGN)
+        h.insert_source()
+
+        def remount_instead_of_removing(prompt):
+            self.mount_elsewhere()
+            return "REMOVED"
+        rules = [("Type YES", "YES"), ("then type REMOVED", remount_instead_of_removing, "once"),
+                 ("then type REMOVED", "q")]
+        self.assertEqual(h.run(["ingest"], rules), 2)
+        self.assertIn("DIRTY USB STILL DETECTED", h.output())
+        self.assertEqual(h.session()["phase"], A.PHASE_INGESTED)
+        self.assertIsNone(h.session()["source_removed_at"])
+
+    def test_f4_release_refuses_source_hidden_as_in_use(self):
+        h = self.h
+        self.ingest_and_approve()
+        h.insert_source()
+        self.mount_elsewhere()
+        self.assertEqual(h.release(), 1)
+        self.assertIn("SOURCE_STILL_PRESENT", h.output())
+        self.assertEqual(h.dest_files(), [])
+
+    # 5. explicit offline lockdown fails closed unless verified offline
+    def test_f5_lockdown_with_unknown_network_state_fails(self):
+        h = self.h
+        h.backend.net = {"interfaces_up": [], "default_route": None, "rfkill": [], "known": False}
+        self.assertEqual(h.run(["network-lockdown"]), 1)
+        self.assertIn("OFFLINE_LOCKDOWN_INCOMPLETE", h.output())
+        self.assertNotIn("LOCKDOWN VERIFIED", h.output())
+
+    def test_f5_failed_link_down_fails_and_blocks_ingest(self):
+        h = self.h
+        h.put("a.ps1", PS1_BENIGN)
+        h.backend.net = {"interfaces_up": ["eth0"], "default_route": True, "rfkill": [], "known": True}
+        h.backend.lockdown_link_failure = True
+        self.assertEqual(h.ingest(["--offline-lockdown"]), 1)
+        out = h.output()
+        self.assertIn("OFFLINE_LOCKDOWN_INCOMPLETE", out)
+        self.assertIn("interfaces still up: eth0", out)
+        self.assertNotIn("LOCKDOWN VERIFIED", out)
+        self.assertEqual(h.mount_calls(), [])
+        self.assertIsNone(h.session())
+        self.assertEqual(h.run(["network-restore"]), 0, h.output())  # partial state stays revertible
+
+    def test_f5_recorded_lockdown_rechecked_when_network_came_back(self):
+        h = self.h
+        h.backend.net = {"interfaces_up": ["eth0"], "default_route": True, "rfkill": [], "known": True}
+        self.assertEqual(h.run(["network-lockdown"]), 0, h.output())
+        self.assertIn("OFFLINE LOCKDOWN VERIFIED", h.output())
+        h.backend.net["interfaces_up"] = ["eth0"]
+        h.backend.net["default_route"] = True
+        self.assertEqual(h.run(["network-lockdown"]), 1)
+        self.assertIn("not verifiably offline", h.output())
+
+    # 6. buffer flush failure withholds the verification claim
+    def test_f6_flush_failure_blocks_verification_claim(self):
+        h = self.h
+        self.ingest_and_approve()
+        h.backend.flush_fails = True
+        self.assertEqual(h.release(), 1)
+        out = h.output()
+        self.assertIn("BUFFER_FLUSH_FAILED", out)
+        self.assertNotIn("DESTINATION HASH MATCH VERIFIED", out)
+        self.assertNotEqual(h.session()["phase"], A.PHASE_RELEASED)
+        self.assertEqual(len([c for c in h.mount_calls() if c[1][0] == "sdc1"]), 1)  # no verification mount
+
+    def test_f6_linux_backend_flush_propagates_failures(self):
+        class Runner:
+            def __init__(self, outcome):
+                self.outcome = outcome
+
+            def run(self, tool, args, **kw):
+                if self.outcome == "missing":
+                    raise A.ToolMissing(tool)
+                return A.CmdResult([tool] + list(args), self.outcome, "", "I/O error")
+
+        class Backend(A.LinuxBackend):
+            def check_node(self, kname, maj_min):
+                pass
+        part = A.Partition(kname="sdc1", maj_min="8:33")
+        for outcome in (1, "missing"):
+            with self.assertRaises(A.BlockingError) as cm:
+                Backend(Runner(outcome)).flush_buffers(part)
+            self.assertEqual(cm.exception.code, "BUFFER_FLUSH_FAILED")
+        Backend(Runner(0)).flush_buffers(part)
+
+    # 7. scan bound enforced while consuming os.scandir()
+    def test_f7_directory_enumeration_is_bounded(self):
+        h = self.h
+        big = h.src / "big"
+        big.mkdir()
+        for i in range(400):
+            (big / ("f%04d.exe" % i)).write_bytes(b"")
+        config = A.load_config(None)
+        config["max_scan_entries"] = 10
+        consumed = {"n": 0}
+        real_scandir = os.scandir
+
+        class Counting:
+            def __init__(self, it):
+                self.it = it
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self.it.close()
+
+            def __iter__(self):
+                for entry in self.it:
+                    consumed["n"] += 1
+                    yield entry
+
+        with unittest.mock.patch.object(A.os, "scandir", lambda target: Counting(real_scandir(target))):
+            result = A.scan_source_tree(h.src, config)
+        self.assertLessEqual(consumed["n"], 12)
+        self.assertTrue(result.limit_reached)
+        self.assertLessEqual(result.entries_examined, 10)
+        self.assertTrue(any("scan limit" in w for w in result.warnings))
+
+    # 8. case-variant directory prefixes collide
+    def test_f8_case_variant_directory_prefixes_rejected(self):
+        h = self.h
+        h.put("A/one.txt", b"1\n")
+        h.put("a/two.txt", b"2\n")
+        h.put("d/E/x.txt", b"3\n")
+        h.put("d/e/y.txt", b"4\n")
+        h.put("B/keep.txt", b"5\n")
+        self.assertEqual(h.ingest(), 0, h.output())
+        s = h.session()
+        self.assertEqual([f["relative_path"] for f in s["files"]], ["B/keep.txt"])
+        collided = sorted(r["relative_path_display"] for r in s["rejected"] if "NAME_COLLISION" in r["reasons"])
+        self.assertEqual(collided, ["A/one.txt", "a/two.txt", "d/E/x.txt", "d/e/y.txt"])
+
+    # 9. verify-clean checks manifest and reports against the local release inventory
+    def test_f9_verify_clean_detects_metadata_tampering(self):
+        h = self.h
+        self.ingest_and_approve()
+        self.assertEqual(h.release(), 0, h.output())
+        inventory = h.session()["release"]["expected_inventory"]
+        self.assertIn("MANIFEST/manifest.json", inventory)
+        self.assertIn("REPORTS/transfer-report.txt", inventory)
+        verify_rules = [("Insert ONLY the CLEAN USB", ""), ("Type YES", "YES")]
+        self.assertEqual(h.run(["verify-clean"], verify_rules), 0, h.output())
+        for rel in ("MANIFEST/manifest.json", "REPORTS/transfer-report.txt"):
+            target = h.dst / "RECOVERY_TRANSFER" / rel
+            original = target.read_bytes()
+            target.write_bytes(original.replace(b"HASH_NOT_PREAUTHORIZED", b"INTEGRITY_VERIFIED_AGAINST"))
+            self.assertNotEqual(target.read_bytes(), original)
+            self.assertEqual(h.run(["verify-clean"], verify_rules), 1)
+            self.assertIn("LOCAL SESSION: HASH MISMATCH %s" % rel, h.output())
+            target.write_bytes(original)
+        (h.dst / "RECOVERY_TRANSFER" / "REPORTS" / "extra.txt").write_text("x")
+        self.assertEqual(h.run(["verify-clean"], verify_rules), 1)
+        self.assertIn("LOCAL SESSION: UNEXPECTED FILE REPORTS/extra.txt", h.output())
+
+    # 10. stored scan output stays readable; write and read limits are consistent
+    def test_f10_many_rejections_are_bounded_and_session_stays_readable(self):
+        h = self.h
+        for i in range(A.MAX_REJECTED_RECORDS + 200):
+            (h.src / ("tool%05d.exe" % i)).write_bytes(b"")
+        h.put("good.ps1", PS1_BENIGN)
+        self.assertEqual(h.ingest(), 0, h.output())
+        s = h.session()
+        self.assertEqual(len(s["rejected"]), A.MAX_REJECTED_RECORDS)
+        self.assertEqual(s["scan"]["rejected"], A.MAX_REJECTED_RECORDS + 200)
+        self.assertEqual(s["scan"]["rejected_omitted"], 200)
+        self.assertEqual(s["scan"]["rejected_reason_counts"]["DENIED_FILE_TYPE"], A.MAX_REJECTED_RECORDS + 200)
+        self.assertLess((h.state / "session.json").stat().st_size, A.STATE_FILE_LIMIT)
+        self.assertEqual(h.run(["review", "--list"]), 0, h.output())
+        self.assertEqual(h.run(["report"]), 0, h.output())
+        self.assertIn("200 further rejected entries", h.output())
+
+    def test_f10_state_write_refuses_what_read_would_reject(self):
+        h = self.h
+        target = h.tmp / "state.json"
+        with unittest.mock.patch.object(A, "STATE_FILE_LIMIT", 256):
+            with self.assertRaises(A.BlockingError) as cm:
+                A._write_private_json(target, {"x": "y" * 300})
+            self.assertEqual(cm.exception.code, "STATE_TOO_LARGE")
+            self.assertFalse(target.exists())
+            A._write_private_json(target, {"x": "y" * 100})
+            self.assertEqual(A._read_private_json(target)["x"], "y" * 100)
+        config = h.tmp / "c.json"
+        config.write_text(json.dumps({"max_files": 5000}))
+        with self.assertRaises(A.ConfigError):
+            A.load_config(str(config))
 
 
 class ConsoleTests(unittest.TestCase):

@@ -181,7 +181,7 @@ DIGEST=$(sha256sum SHA256SUMS | cut -d' ' -f1)
 info "Bundle digest (SHA-256 of SHA256SUMS): $DIGEST"
 if [ -n "$EXPECT_DIGEST" ]; then
     EXPECT_LC=$(printf '%s' "$EXPECT_DIGEST" | tr 'A-F' 'a-f')
-    [ "$EXPECT_LC" = "$DIGEST" ] || die "bundle digest does NOT match --expect-digest; do not install this bundle"
+    [ "$EXPECT_LC" = "$DIGEST" ] || die "bundle digest does NOT match --expect-digest; do not install this bundle. Note: --expect-digest takes the BUNDLE DIGEST (SHA-256 of SHA256SUMS, published as mx_usb_airlock-$VERSION.SHA256SUMS.sha256), not the archive SHA-256."
     pass "BUNDLE DIGEST MATCHES THE EXPECTED VALUE"
 else
     warn "SHA256SUMS only detects corruption. To detect tampering, compare the digest above (or the .tar.gz SHA-256) with a value obtained independently, or pass --expect-digest."

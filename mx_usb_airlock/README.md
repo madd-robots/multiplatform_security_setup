@@ -35,26 +35,40 @@ or desktop settings are created or changed.
 The bundle `mx_usb_airlock-<version>.tar.gz` contains the application, the
 docs, the tests, `LICENSE`, `install.sh` and a `SHA256SUMS` file.
 
-1. Check the archive on a trusted machine, and record the hash somewhere
-   other than the USB drive you carry it on:
-   `sha256sum -c mx_usb_airlock-1.0.0.tar.gz.sha256`
-2. On the live system:
+A release publishes **two different hashes**. Do not mix them up:
+
+| Value | Published in | What it covers | Where you use it |
+|---|---|---|---|
+| **Archive SHA-256** | `mx_usb_airlock-1.0.0.tar.gz.sha256` | the `.tar.gz` file itself | `sha256sum -c` before extracting |
+| **Bundle digest** | `mx_usb_airlock-1.0.0.SHA256SUMS.sha256` | the `SHA256SUMS` file inside the archive | `install.sh --expect-digest` |
+
+`install.sh --expect-digest` only accepts the **bundle digest**. Passing the
+archive SHA-256 there always fails.
+
+1. On a trusted machine, record **both** values somewhere other than the USB
+   drive you carry the bundle on (for example on paper, or from the
+   GitHub release or commit).
+2. Check the archive against the recorded **archive SHA-256**:
+   `sha256sum -c mx_usb_airlock-1.0.0.tar.gz.sha256`, and confirm the value
+   printed in that file is the one you recorded.
+3. On the live system, extract the archive and install with the recorded
+   **bundle digest**:
    ```
    tar -xzf mx_usb_airlock-1.0.0.tar.gz
    cd mx_usb_airlock-1.0.0
-   sudo ./install.sh --expect-digest <bundle digest you recorded>
+   sudo ./install.sh --expect-digest <BUNDLE DIGEST from mx_usb_airlock-1.0.0.SHA256SUMS.sha256>
    ```
    The installer:
    - checks every file against `SHA256SUMS` and accepts only the expected
      file list
-   - checks the bundle digest (the SHA-256 of `SHA256SUMS`)
+   - checks the bundle digest (the SHA-256 of `SHA256SUMS`) against `--expect-digest`
    - checks Python 3.9+ and the required tools
    - runs the bundled test suite (simulation only)
    - installs into a staging directory, re-verifies it, and swaps it into
      `/opt/mx_usb_airlock`
    - writes the launcher `/usr/local/bin/mx-usb-airlock`, which runs
      `python3 -I -B .../airlock.py`
-3. Run `mx-usb-airlock status`. Every `python3 -I -B airlock.py <command>`
+4. Run `mx-usb-airlock status`. Every `python3 -I -B airlock.py <command>`
    below can be written as `mx-usb-airlock <command>`.
 
 Installer options:

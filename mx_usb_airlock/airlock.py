@@ -126,6 +126,15 @@ MAJMIN_RE = re.compile(r"^\d{1,5}:\d{1,7}$")
 RUN_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{8}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
+# State files are written and read with the same size limit.  Scan output that
+# goes into the session is bounded so a valid ingest always stays far below it.
+STATE_FILE_LIMIT = 64 * 1024 * 1024
+MAX_REJECTED_RECORDS = 1000
+# Protection reason for a removable disk mounted outside desktop locations.
+# Such a disk is hidden from selection but still counts as attached removable
+# media for every coexistence, removal and provenance check.
+IN_USE_PREFIX = "IN USE"
+
 INSTALLED_OS_WARNING = (
     "A known-good live environment was NOT detected. Running inside an "
     "installed operating system that may already be compromised cannot "
@@ -529,7 +538,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 _CONFIG_LIMITS = {
     "max_file_bytes": (1, 64 * 1024 * 1024),
     "max_total_bytes": (1, 512 * 1024 * 1024),
-    "max_files": (1, 10000),
+    "max_files": (1, 1000),
     "max_scan_entries": (1, 1000000),
     "max_depth": (0, 32),
     "max_name_length": (8, 255),
@@ -1416,11 +1425,17 @@ class LinuxBackend:
         return os.makedev(int(major), int(minor))
 
     def flush_buffers(self, part: Partition) -> None:
+        """Drop cached buffers so the verification pass re-reads the device; failure is blocking."""
+        self.check_node(part.kname, part.maj_min)
         try:
-            self.check_node(part.kname, part.maj_min)
-            self.runner.run("blockdev", ["--flushbufs", "/dev/" + part.kname], privileged=True, timeout=60, check=False)
-        except (BlockingError, ToolMissing):
-            pass
+            res = self.runner.run("blockdev", ["--flushbufs", "/dev/" + part.kname], privileged=True, timeout=60,
+                                  check=False)
+        except ToolMissing:
+            raise BlockingError("BUFFER_FLUSH_FAILED", "blockdev is unavailable, so cached data cannot be flushed "
+                                "before verification")
+        if res.returncode != 0:
+            raise BlockingError("BUFFER_FLUSH_FAILED", "blockdev --flushbufs failed on /dev/%s: %s"
+                                % (part.kname, display_text(res.stderr.strip(), 200)))
 
     def path_on_devices(self, path: str, knames: Iterable[str]) -> bool:
         try:
@@ -1515,21 +1530,34 @@ class LinuxBackend:
 
     def network_lockdown(self, save_path: Path, use_firewall: bool) -> Dict[str, Any]:
         before = self.network_state()
-        record: Dict[str, Any] = {"created_at": utc_now(), "before": before, "actions": []}
+        record: Dict[str, Any] = {"created_at": utc_now(), "before": before, "actions": [], "failures": []}
         _write_private_json(save_path, record, exclusive=True)
+
+        def attempt(tool: str, args: List[str], input_text: Optional[str] = None) -> Tuple[int, str]:
+            try:
+                res = self.runner.run(tool, args, privileged=True, timeout=15, input_text=input_text, check=False)
+            except (ToolMissing, BlockingError) as exc:
+                return -1, display_text(str(exc), 200)
+            return res.returncode, display_text(res.stderr.strip(), 200)
+
         for dev in before["rfkill"]:
             if dev.get("soft") == "unblocked" and isinstance(dev.get("id"), int):
-                res = self.runner.run("rfkill", ["block", str(dev["id"])], privileged=True, timeout=15, check=False)
-                if res.returncode == 0:
+                rc, err = attempt("rfkill", ["block", str(dev["id"])])
+                if rc == 0:
                     record["actions"].append({"type": "rfkill_block", "id": dev["id"]})
-                    _write_private_json(save_path, record)
+                else:
+                    record["failures"].append("rfkill block %s failed: %s" % (dev["id"], err))
+                _write_private_json(save_path, record)
         for ifname in before["interfaces_up"]:
             if not re.fullmatch(r"[A-Za-z0-9_.:@-]{1,15}", ifname):
+                record["failures"].append("interface with an unsupported name was not brought down")
                 continue
-            res = self.runner.run("ip", ["link", "set", "dev", ifname, "down"], privileged=True, timeout=15, check=False)
-            if res.returncode == 0:
+            rc, err = attempt("ip", ["link", "set", "dev", ifname, "down"])
+            if rc == 0:
                 record["actions"].append({"type": "link_down", "ifname": ifname})
-                _write_private_json(save_path, record)
+            else:
+                record["failures"].append("ip link set dev %s down failed: %s" % (ifname, err))
+            _write_private_json(save_path, record)
         if use_firewall:
             ruleset = (
                 "table inet airlock_lockdown {\n"
@@ -1537,13 +1565,12 @@ class LinuxBackend:
                 "  chain output { type filter hook output priority -300; policy drop; oif \"lo\" accept; }\n"
                 "  chain forward { type filter hook forward priority -300; policy drop; }\n"
                 "}\n")
-            res = self.runner.run("nft", ["-f", "-"], privileged=True, timeout=15, input_text=ruleset, check=False)
-            if res.returncode == 0:
+            rc, err = attempt("nft", ["-f", "-"], ruleset)
+            if rc == 0:
                 record["actions"].append({"type": "nft_table", "name": "airlock_lockdown"})
-                _write_private_json(save_path, record)
             else:
-                record["firewall_error"] = display_text(res.stderr.strip(), 200)
-                _write_private_json(save_path, record)
+                record["failures"].append("nftables drop policy could not be applied: %s" % err)
+            _write_private_json(save_path, record)
         record["after"] = self.network_state()
         _write_private_json(save_path, record)
         return record
@@ -1623,6 +1650,9 @@ class LinuxBackend:
 
 def _write_private_json(path: Path, data: Any, exclusive: bool = False) -> None:
     payload = (json.dumps(data, indent=2, sort_keys=True, ensure_ascii=True) + "\n").encode("ascii")
+    if len(payload) > STATE_FILE_LIMIT:
+        # Never write a state file that _read_private_json would refuse.
+        raise BlockingError("STATE_TOO_LARGE", "state for %s would exceed %d bytes" % (path, STATE_FILE_LIMIT))
     if exclusive:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
         try:
@@ -1642,7 +1672,8 @@ def _write_private_json(path: Path, data: Any, exclusive: bool = False) -> None:
     os.replace(tmp, path)
 
 
-def _read_private_json(path: Path, limit: int = 32 * 1024 * 1024) -> Any:
+def _read_private_json(path: Path, limit: Optional[int] = None) -> Any:
+    limit = STATE_FILE_LIMIT if limit is None else limit
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
         st = os.fstat(fd)
@@ -1669,6 +1700,8 @@ class SimulatedBackend:
         self.mounted: Dict[str, Dict[str, Any]] = {}
         self.readonly: Set[str] = set()
         self.readonly_supported = True
+        self.flush_fails = False
+        self.lockdown_link_failure = False
         self.live_detected = True
         self.net: Dict[str, Any] = {"interfaces_up": [], "default_route": False, "rfkill": [], "known": True}
         self.clamav_result: Any = None
@@ -1768,7 +1801,9 @@ class SimulatedBackend:
         return None
 
     def flush_buffers(self, part: Partition) -> None:
-        pass
+        self.calls.append(("flush", part.kname))
+        if self.flush_fails:
+            raise BlockingError("BUFFER_FLUSH_FAILED", "blockdev --flushbufs failed (simulated)")
 
     def is_mounted_at(self, target: Path) -> bool:
         return False
@@ -1803,11 +1838,15 @@ class SimulatedBackend:
         return copy.deepcopy(self.net)
 
     def network_lockdown(self, save_path: Path, use_firewall: bool) -> Dict[str, Any]:
-        record = {"created_at": utc_now(), "before": self.network_state(),
-                  "actions": [{"type": "link_down", "ifname": i} for i in self.net["interfaces_up"]]}
+        record: Dict[str, Any] = {"created_at": utc_now(), "before": self.network_state(), "actions": [],
+                                  "failures": []}
         _write_private_json(save_path, record, exclusive=True)
-        self.net["interfaces_up"] = []
-        self.net["default_route"] = False
+        if self.lockdown_link_failure:
+            record["failures"] = ["ip link set dev %s down failed (simulated)" % i for i in self.net["interfaces_up"]]
+        else:
+            record["actions"] = [{"type": "link_down", "ifname": i} for i in self.net["interfaces_up"]]
+            self.net["interfaces_up"] = []
+            self.net["default_route"] = False
         record["after"] = self.network_state()
         _write_private_json(save_path, record)
         return record
@@ -2056,13 +2095,29 @@ def enumerate_devices(ctx: Context) -> Tuple[List[Disk], Dict[str, str]]:
                 t = m.target
                 if t.startswith(("/media/", "/run/media/")) or t == own or t.startswith(own + "/"):
                     continue
-                protected.setdefault(disk.kname, "IN USE (mounted at %s)" % display_text(t, 80))
+                protected.setdefault(disk.kname, "%s (mounted at %s)" % (IN_USE_PREFIX, display_text(t, 80)))
     return disks, protected
 
 
+def removable_like(disks: List[Disk]) -> List[Disk]:
+    """Every physically removable/USB disk, whatever its protection status."""
+    return [d for d in disks if d.size > 0 and (d.removable or d.hotplug or d.tran == "usb")]
+
+
 def removable_disks(disks: List[Disk], protected: Dict[str, str]) -> List[Disk]:
-    return [d for d in disks if d.kname not in protected and d.size > 0
-            and (d.removable or d.hotplug or d.tran == "usb")]
+    """Removable disks that may be offered for selection."""
+    return [d for d in removable_like(disks) if d.kname not in protected]
+
+
+def attached_removable(disks: List[Disk], protected: Dict[str, str]) -> List[Disk]:
+    """Removable disks that count as attached media: all except system/live media.
+
+    Disks that are only "in use" (mounted somewhere unusual) are included, so a
+    dirty USB cannot escape coexistence or provenance checks by being mounted
+    at a location such as /mnt.
+    """
+    return [d for d in removable_like(disks)
+            if d.kname not in protected or protected[d.kname].startswith(IN_USE_PREFIX)]
 
 
 def matches_fingerprint(fp: Dict[str, Any], disk: Disk) -> bool:
@@ -2095,6 +2150,12 @@ def revalidate(ctx: Context, expected: Dict[str, Any], part_kname: Optional[str]
         raise BlockingError("IDENTITY_CHANGED", "device %s by-id links changed since it was confirmed" % disk.kname)
     if disk.kname in protected:
         raise BlockingError("PROTECTED_DEVICE", "device %s is now classified as %s" % (disk.kname, protected[disk.kname]))
+    others = [d for d in attached_removable(disks, protected) if d.kname != disk.kname]
+    if others:
+        raise BlockingError("UNEXPECTED_REMOVABLE_DEVICE",
+                            "another removable storage device appeared (%s). Source and destination must never be "
+                            "attached at the same time. STOP."
+                            % ", ".join(display_text(d.preferred_by_id() or d.kname) for d in others))
     ctx.backend.check_node(disk.kname, disk.maj_min)
     part = None
     if part_kname:
@@ -2227,6 +2288,19 @@ class ScanResult:
     entries_examined: int = 0
     total_bytes: int = 0
     limit_reached: bool = False
+    rejected_total: int = 0
+    rejected_omitted: int = 0
+    rejected_reason_counts: Dict[str, int] = field(default_factory=dict)
+
+    def add_rejection(self, entry: Dict[str, Any]) -> None:
+        """Record a rejection; detail is kept for the first MAX_REJECTED_RECORDS, all are counted."""
+        self.rejected_total += 1
+        for reason in entry["reasons"]:
+            self.rejected_reason_counts[reason] = self.rejected_reason_counts.get(reason, 0) + 1
+        if len(self.rejected) < MAX_REJECTED_RECORDS:
+            self.rejected.append(entry)
+        else:
+            self.rejected_omitted += 1
 
 
 class _Scanner:
@@ -2238,29 +2312,43 @@ class _Scanner:
         self.allowed = set(config["allowed_extensions"])
 
     def reject(self, rel_parts: List[str], reasons: List[str], size: Optional[int] = None, kind: str = "file") -> None:
-        self.result.rejected.append({
+        self.result.add_rejection({
             "kind": kind,
-            "relative_path_display": "/".join(display_text(p, 120) for p in rel_parts),
+            "relative_path_display": display_text("/".join(display_text(p, 120) for p in rel_parts), 600),
             "original_name": rel_parts[-1],
             "reasons": reasons,
             "size": size,
         })
 
+    def hit_limit(self) -> None:
+        if not self.result.limit_reached:
+            self.result.limit_reached = True
+            self.result.warnings.append("scan limit of %d entries reached; remaining entries were not examined "
+                                        "and stay behind" % self.config["max_scan_entries"])
+
     def scan_dir(self, dfd: int, rel_parts: List[str], depth: int) -> None:
+        # Consume the directory iterator only up to the remaining budget, so a
+        # hostile directory with millions of entries is never fully listed.
+        budget = self.config["max_scan_entries"] - self.result.entries_examined
+        names: List[str] = []
+        truncated = False
         try:
             with os.scandir(dfd) as iterator:
-                names = sorted(entry.name for entry in iterator)
+                for entry in iterator:
+                    if len(names) >= budget:
+                        truncated = True
+                        break
+                    names.append(entry.name)
         except OSError as exc:
             raise BlockingError("SOURCE_READ_ERROR", "cannot list source directory: %s" % exc.strerror)
+        names.sort()
+        if truncated:
+            self.hit_limit()
         for name in names:
-            if self.result.limit_reached:
+            if self.result.entries_examined >= self.config["max_scan_entries"]:
+                self.hit_limit()
                 return
             self.result.entries_examined += 1
-            if self.result.entries_examined > self.config["max_scan_entries"]:
-                self.result.limit_reached = True
-                self.result.warnings.append("scan limit of %d entries reached; remaining entries were not examined "
-                                            "and stay behind" % self.config["max_scan_entries"])
-                return
             if self.on_entry:
                 self.on_entry()
             if name in (".", "..") or "/" in name or "\x00" in name:
@@ -2418,25 +2506,31 @@ def scan_source_tree(root: Path, config: Dict[str, Any], expected_dev: Optional[
 def _reject_collisions(result: ScanResult) -> None:
     """Reject names that collide on case-insensitive targets (FAT, NTFS, Windows)."""
     keys: Dict[str, List[int]] = {}
+    # casefolded directory prefix -> distinct original spellings, e.g. "a" -> {"A", "a"}
+    spellings: Dict[str, Set[str]] = {}
     for index, rec in enumerate(result.accepted):
-        keys.setdefault(unicodedata.normalize("NFC", rec["relative_path"]).casefold(), []).append(index)
-    prefixes: Set[str] = set()
-    for key in keys:
-        parts = key.split("/")
+        normalized = unicodedata.normalize("NFC", rec["relative_path"])
+        keys.setdefault(normalized.casefold(), []).append(index)
+        parts = normalized.split("/")
         for i in range(1, len(parts)):
-            prefixes.add("/".join(parts[:i]))
+            original = "/".join(parts[:i])
+            spellings.setdefault(original.casefold(), set()).add(original)
+    prefixes = set(spellings)
+    conflicting = {key for key, names in spellings.items() if len(names) > 1}
     bad: Set[int] = set()
     for key, indexes in keys.items():
-        if len(indexes) > 1 or key in prefixes:
+        parts = key.split("/")
+        under_conflict = any("/".join(parts[:i]) in conflicting for i in range(1, len(parts)))
+        if len(indexes) > 1 or key in prefixes or under_conflict:
             bad.update(indexes)
     if not bad:
         return
     keep = []
     for index, rec in enumerate(result.accepted):
         if index in bad:
-            result.rejected.append({"kind": "file", "relative_path_display": rec["relative_path_display"],
-                                    "original_name": rec["original_name"], "reasons": ["NAME_COLLISION"],
-                                    "size": rec["size"]})
+            result.add_rejection({"kind": "file", "relative_path_display": rec["relative_path_display"],
+                                  "original_name": rec["original_name"], "reasons": ["NAME_COLLISION"],
+                                  "size": rec["size"]})
             result.total_bytes -= rec["size"]
         else:
             keep.append(rec)
@@ -2606,7 +2700,7 @@ def load_trusted_hashes(ctx: Context, path: str) -> Tuple[HashList, Dict[str, An
     finally:
         os.close(fd)
     disks, protected = enumerate_devices(ctx)
-    removable = [d.kname for d in removable_disks(disks, protected)]
+    removable = [d.kname for d in attached_removable(disks, protected)]
     if removable and ctx.backend.path_on_devices(path, removable):
         raise BlockingError("TRUSTED_HASH_ON_REMOVABLE",
                             "the trusted hash file is stored on removable USB media; it must be kept separately "
@@ -2729,18 +2823,40 @@ def describe_network(console: Console, net: Dict[str, Any]) -> None:
         console.warn("Radios not blocked by rfkill: %s" % ", ".join(str(d.get("type")) for d in unblocked))
 
 
+def network_offline_problems(state: Dict[str, Any]) -> List[str]:
+    """Reasons the given network state cannot be confirmed offline (empty list = verified offline)."""
+    if not state.get("known"):
+        return ["network state could not be determined (ip tool unavailable or failed)"]
+    problems = []
+    if state.get("interfaces_up"):
+        problems.append("interfaces still up: %s" % ", ".join(display_text(i) for i in state["interfaces_up"]))
+    if state.get("default_route"):
+        problems.append("a default route still exists")
+    return problems
+
+
 def do_network_lockdown(ctx: Context, use_firewall: bool) -> Dict[str, Any]:
+    """Apply (or re-check) the explicitly requested offline lockdown; fail closed unless verified offline."""
     c = ctx.console
-    if os.path.lexists(str(ctx.store.lockdown_path)):
-        c.info("A network lockdown is already active (state saved at %s)." % ctx.store.lockdown_path)
-        return _read_private_json(ctx.store.lockdown_path)
+    saved = ctx.store.lockdown_path
+    if os.path.lexists(str(saved)):
+        record = _read_private_json(saved)
+        problems = network_offline_problems(ctx.backend.network_state())
+        if problems:
+            raise BlockingError("OFFLINE_LOCKDOWN_INCOMPLETE", "a lockdown is recorded at %s but the system is not "
+                                "verifiably offline: %s" % (saved, "; ".join(problems)))
+        c.passed("OFFLINE LOCKDOWN ALREADY ACTIVE AND VERIFIED (state saved at %s)." % saved)
+        return record
     ctx.backend.ensure_privilege(c)
-    record = ctx.backend.network_lockdown(ctx.store.lockdown_path, use_firewall)
-    ctx.log.event("network_lockdown", actions=record.get("actions", []))
-    c.passed("Offline lockdown applied (%d actions). Prior state saved to %s."
-             % (len(record.get("actions", [])), ctx.store.lockdown_path))
-    if record.get("firewall_error"):
-        c.warn("Firewall drop policy could not be applied: %s" % record["firewall_error"])
+    record = ctx.backend.network_lockdown(saved, use_firewall)
+    problems = list(record.get("failures", [])) + network_offline_problems(record.get("after") or {})
+    ctx.log.event("network_lockdown", actions=record.get("actions", []), problems=problems)
+    if problems:
+        raise BlockingError("OFFLINE_LOCKDOWN_INCOMPLETE",
+                            "offline lockdown could NOT be verified: %s. Changes made so far are recorded in %s; "
+                            "revert them with network-restore." % ("; ".join(problems), saved))
+    c.passed("OFFLINE LOCKDOWN VERIFIED (%d actions; no interface up, no default route). Prior state saved to %s."
+             % (len(record.get("actions", [])), saved))
     c.info("Restore later with: python3 airlock.py network-restore")
     return record
 
@@ -2801,8 +2917,10 @@ def confirm_no_removable_present(ctx: Context, session: Dict[str, Any]) -> None:
             c.warn("Removal not confirmed.")
             continue
         disks, protected = enumerate_devices(ctx)
-        present = removable_disks(disks, protected)
-        still = [d for d in present if fingerprint and matches_fingerprint(fingerprint, d)]
+        # The fingerprint is checked against every removable disk before any
+        # protection filtering, so a remounted dirty USB is still recognised.
+        still = [d for d in removable_like(disks) if fingerprint and matches_fingerprint(fingerprint, d)]
+        present = attached_removable(disks, protected)
         if still:
             c.blocking("DIRTY USB STILL DETECTED (%s). DO NOT ENTER RELEASE MODE. Remove it physically."
                        % ", ".join(display_text(d.preferred_by_id() or d.kname) for d in still))
@@ -2838,9 +2956,10 @@ def wait_for_single_removable(ctx: Context, prompt: str, event: Optional[str] = 
             raise OperatorCancelled("operator cancelled")
     for _attempt in range(20):
         disks, protected = enumerate_devices(ctx)
+        attached = attached_removable(disks, protected)
         present = removable_disks(disks, protected)
-        if len(present) > 1:
-            for d in present:
+        if len(attached) > 1:
+            for d in attached:
                 c.line("  present: %s  %s  serial %s  %s" % (display_text(d.preferred_by_id() or d.kname),
                                                               display_text(d.model), display_text(d.serial), human_size(d.size)))
             raise BlockingError("MULTIPLE_REMOVABLE_DEVICES",
@@ -2850,6 +2969,9 @@ def wait_for_single_removable(ctx: Context, prompt: str, event: Optional[str] = 
                                 "--live-device /dev/disk/by-id/...")
         if present:
             return present[0]
+        if attached:
+            c.warn("A removable device is attached but %s; unmount it or remove it."
+                   % protected.get(attached[0].kname, "not selectable"))
         if event:
             ctx.backend.notify(event)
         if c.ask(prompt).lower() in ("q", "quit"):
@@ -2900,7 +3022,7 @@ def cmd_status(ctx: Context) -> int:
         c.line("  /dev/%-8s %-10s %s" % (disk.kname, human_size(disk.size), role))
         c.line("      model %s  serial %s  by-id %s" % (display_text(disk.model) or "-", display_text(disk.serial) or "-",
                                                        display_text(disk.preferred_by_id()) or "-"))
-    present = removable_disks(disks, protected)
+    present = attached_removable(disks, protected)
     if len(present) > 1:
         c.blocking("More than one removable storage device is attached. Source and destination must never coexist.")
     session = ctx.store.load_session()
@@ -2910,7 +3032,8 @@ def cmd_status(ctx: Context) -> int:
         return 0
     c.line("Session     : %s  phase %s%s" % (session["run_id"], session["phase"], "  (simulation)" if session.get("simulated") else ""))
     approved = sum(1 for f in session["files"] if f.get("approved"))
-    c.line("Files       : %d quarantined, %d approved, %d rejected" % (len(session["files"]), approved, len(session["rejected"])))
+    c.line("Files       : %d quarantined, %d approved, %d rejected" % (
+        len(session["files"]), approved, session.get("scan", {}).get("rejected", len(session["rejected"]))))
     for b in session.get("blocking", []):
         c.blocking("%s: %s" % (b["code"], b["message"]))
     next_step = {
@@ -3047,7 +3170,10 @@ def _ingest_finish(ctx: Context, session: Dict[str, Any], scan: ScanResult) -> N
         rec["approved_sha256"] = None
         rec["clamav"] = "NOT_SCANNED"
     session["scan"] = {"entries_examined": scan.entries_examined, "limit_reached": scan.limit_reached,
-                       "accepted": len(scan.accepted), "rejected": len(scan.rejected), "total_bytes": scan.total_bytes}
+                       "accepted": len(scan.accepted), "rejected": scan.rejected_total,
+                       "rejected_listed": len(scan.rejected), "rejected_omitted": scan.rejected_omitted,
+                       "rejected_reason_counts": dict(sorted(scan.rejected_reason_counts.items())),
+                       "total_bytes": scan.total_bytes}
     for warning in scan.warnings:
         add_warning(session, "SCAN_WARNING", warning)
     compare_source_supplied_hashes(session, scan.accepted)
@@ -3145,7 +3271,7 @@ def print_ingest_summary(ctx: Context, session: Dict[str, Any]) -> None:
     c = ctx.console
     c.heading("INGEST SUMMARY  (run %s)" % session["run_id"])
     c.line("Entries examined: %d   quarantined: %d   rejected/skipped: %d"
-           % (session["scan"]["entries_examined"], len(session["files"]), len(session["rejected"])))
+           % (session["scan"]["entries_examined"], len(session["files"]), session["scan"]["rejected"]))
     for index, rec in enumerate(session["files"], 1):
         print_file_detail(c, index, rec)
     if session["rejected"]:
@@ -3153,8 +3279,10 @@ def print_ingest_summary(ctx: Context, session: Dict[str, Any]) -> None:
         c.line("Left behind on the dirty USB (not copied):")
         for rej in session["rejected"][:200]:
             c.line("  - %s [%s]: %s" % (rej["relative_path_display"], rej["kind"], ", ".join(rej["reasons"])))
-        if len(session["rejected"]) > 200:
-            c.line("  ... %d more (see report)" % (len(session["rejected"]) - 200))
+        more = session["scan"]["rejected"] - min(200, len(session["rejected"]))
+        if more > 0:
+            c.line("  ... %d more (see report; reason counts: %s)" % (
+                more, ", ".join("%s=%d" % kv for kv in session["scan"]["rejected_reason_counts"].items())))
     if not session["files"]:
         c.warn("No files were eligible for quarantine.")
 
@@ -3503,8 +3631,8 @@ def _release_to_destination(ctx: Context, session: Dict[str, Any], approved: Lis
     c = ctx.console
     source_fp = session["source"]["identity"] if session.get("source") else {}
     disks, protected = enumerate_devices(ctx)
-    present = removable_disks(disks, protected)
-    if any(source_fp and matches_fingerprint(source_fp, d) for d in present):
+    present = attached_removable(disks, protected)
+    if any(source_fp and matches_fingerprint(source_fp, d) for d in removable_like(disks)):
         raise BlockingError("SOURCE_STILL_PRESENT", "the dirty source USB is attached. DO NOT ENTER RELEASE MODE. "
                             "Remove it physically and run release again.")
     if present:
@@ -3615,7 +3743,8 @@ def _release_to_destination(ctx: Context, session: Dict[str, Any], approved: Lis
         raise BlockingError("DESTINATION_VERIFICATION_MISMATCH",
                             "destination contents do not match what was written (%d problems)" % len(problems))
     return {"transfer_dir": writer.transfer_dir, "destination": attempt["destination"],
-            "files_written": sorted(expected), "verification": verification, "completed_at": utc_now()}
+            "files_written": sorted(expected), "expected_inventory": dict(sorted(expected.items())),
+            "verification": verification, "completed_at": utc_now()}
 
 
 def _inspect_destination_root(c: Console, root: Path) -> List[str]:
@@ -3690,9 +3819,15 @@ def cmd_verify_clean(ctx: Context) -> int:
                 problems += compare_inventory(usb_sums.named, files, [])
             trusted_source = "the USB's own SHA256SUMS.txt (only as trustworthy as the USB itself)"
             if session and session.get("release") and session["release"]["transfer_dir"] == tdir:
-                local = {"FILES/" + r["relative_path"]: r["sha256"] for r in session["files"] if r.get("approved")}
-                problems += ["LOCAL SESSION: " + p for p in compare_inventory(local, files, [])]
-                trusted_source = "the local session manifest and the USB's SHA256SUMS.txt"
+                inventory = session["release"].get("expected_inventory")
+                if inventory:
+                    # Everything release wrote and verified: payload, manifest and reports.
+                    problems += ["LOCAL SESSION: " + p for p in compare_inventory(inventory, actual, [])]
+                    trusted_source = "the local release inventory (files, manifest, reports) and the USB's SHA256SUMS.txt"
+                else:
+                    local = {"FILES/" + r["relative_path"]: r["sha256"] for r in session["files"] if r.get("approved")}
+                    problems += ["LOCAL SESSION: " + p for p in compare_inventory(local, files, [])]
+                    trusted_source = "the local session manifest and the USB's SHA256SUMS.txt"
             results.append({"transfer_dir": tdir, "problems": problems, "compared_against": trusted_source})
             problems_total += len(problems)
             if problems:
@@ -3869,6 +4004,11 @@ def render_report_text(report: Dict[str, Any]) -> str:
     add("LEFT BEHIND (rejected or skipped)")
     for rej in report.get("rejected", [])[:500]:
         add("  %s [%s]: %s" % (rej["relative_path_display"], rej["kind"], ", ".join(rej["reasons"])))
+    scan = report.get("scan") or {}
+    if scan.get("rejected_omitted"):
+        add("  ... %d further rejected entries are counted but not listed individually" % scan["rejected_omitted"])
+    if scan.get("rejected_reason_counts"):
+        add("  Reason counts: %s" % ", ".join("%s=%d" % kv for kv in scan["rejected_reason_counts"].items()))
     if not report.get("rejected"):
         add("  (none)")
     clam = report.get("clamav") or {}
@@ -4041,15 +4181,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def resolve_live_devices(paths: List[str]) -> Set[str]:
+def resolve_live_devices(paths: List[str], dev_root: str = "/dev", sysfs_block: str = "/sys/class/block") -> Set[str]:
+    """Resolve --live-device by-id links to WHOLE-disk kernel names (partition links are promoted)."""
+    prefix = dev_root + "/disk/by-id/"
     knames = set()
     for raw in paths:
-        if not raw.startswith("/dev/disk/by-id/") or "/" in raw[len("/dev/disk/by-id/"):]:
+        if not raw.startswith(prefix) or "/" in raw[len(prefix):]:
             raise ConfigError("--live-device must be a /dev/disk/by-id/ path")
         real = os.path.realpath(raw)
         kname = os.path.basename(real)
-        if os.path.dirname(real) != "/dev" or not KNAME_RE.match(kname):
+        if os.path.dirname(real) != dev_root or not KNAME_RE.match(kname):
             raise ConfigError("--live-device does not resolve to a block device: %s" % display_text(raw))
+        sysdir = os.path.join(sysfs_block, kname)
+        if not os.path.exists(sysdir):
+            raise ConfigError("--live-device: no sysfs entry for %s; cannot determine its disk" % kname)
+        if os.path.exists(os.path.join(sysdir, "partition")):
+            parent = os.path.basename(os.path.dirname(os.path.realpath(sysdir)))
+            if not KNAME_RE.match(parent):
+                raise ConfigError("--live-device: cannot determine the disk containing %s" % kname)
+            kname = parent
         knames.add(kname)
     return knames
 

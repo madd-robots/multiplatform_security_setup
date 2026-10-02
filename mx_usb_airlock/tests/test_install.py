@@ -7,6 +7,7 @@ directory is changed.  Skipped inside an installed bundle (tools/ is not
 shipped) or where /bin/sh or sha256sum is unavailable.
 """
 
+import hashlib
 import importlib.util
 import os
 import shutil
@@ -89,6 +90,38 @@ class BundleInstallTests(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertFalse(self.prefix.exists())
         self.assertFalse(self.launcher.exists())
+
+    def test_f11_archive_hash_and_bundle_digest_are_distinct_and_documented(self):
+        version = self.builder.read_version()
+        top = "mx_usb_airlock-%s" % version
+        sidecar = self.tmp / "dist" / ("%s.SHA256SUMS.sha256" % top)
+        archive_sidecar = self.tmp / "dist" / ("%s.tar.gz.sha256" % top)
+        digest_line = sidecar.read_text().split()
+        self.assertEqual(digest_line, [self.digest, "%s/SHA256SUMS" % top])
+        self.assertEqual(self.digest, hashlib.sha256((self.bundle / "SHA256SUMS").read_bytes()).hexdigest())
+        self.assertEqual(archive_sidecar.read_text().split()[0], self.archive_sha)
+        self.assertNotEqual(self.digest, self.archive_sha)
+        # the sidecar is checkable with sha256sum after extraction
+        check = subprocess.run(["sha256sum", "-c", str(sidecar)], cwd=str(self.extract), capture_output=True,
+                               text=True, timeout=60)
+        self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+        # passing the ARCHIVE hash to --expect-digest fails with an explanation
+        res = self.install("--expect-digest", self.archive_sha)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("not the archive SHA-256", res.stderr)
+        self.assertFalse(self.prefix.exists())
+        # the published bundle digest works
+        res = self.install("--expect-digest", digest_line[0])
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        # README: both values named, and the documented --expect-digest uses the bundle digest sidecar
+        readme = (ROOT / "README.md").read_text()
+        self.assertIn("Archive SHA-256", readme)
+        self.assertIn("Bundle digest", readme)
+        install_lines = [l for l in readme.splitlines() if l.strip().startswith("sudo ./install.sh --expect-digest")]
+        self.assertTrue(install_lines)
+        for line in install_lines:
+            self.assertIn("SHA256SUMS.sha256", line)
+            self.assertNotIn("tar.gz.sha256", line)
 
     def test_tampered_bundle_is_refused(self):
         target = self.bundle / "airlock.py"

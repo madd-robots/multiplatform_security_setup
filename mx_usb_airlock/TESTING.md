@@ -54,6 +54,14 @@ there are no backticks, no `shell=True`, and no eval, exec, pickle,
 `os.system` or `bash -c`. It also checks that no shell interpretation happens
 (shell metacharacters are passed literally to a real `echo`).
 
+### PR #3 review findings
+
+`PullRequestReviewRegressionTests` in `tests/test_airlock.py` has a test named
+`test_f<N>_...` for each of review findings 1 to 10.
+`test_f11_archive_hash_and_bundle_digest_are_distinct_and_documented` in
+`tests/test_install.py` covers finding 11. Each of these tests was confirmed
+to fail on the code before the fixes.
+
 ### Bundle and installer (`tests/test_install.py`)
 
 These tests build the release tarball into a temporary directory, extract it,

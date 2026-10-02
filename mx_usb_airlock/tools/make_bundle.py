@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Build the release bundle: dist/mx_usb_airlock-<version>.tar.gz plus a .sha256 file.
+"""Build the release bundle in dist/:
+
+  mx_usb_airlock-<version>.tar.gz                  the archive
+  mx_usb_airlock-<version>.tar.gz.sha256           ARCHIVE SHA-256 (check before extracting)
+  mx_usb_airlock-<version>.SHA256SUMS.sha256       BUNDLE DIGEST: SHA-256 of the SHA256SUMS file inside
+                                                   the archive; this is the value install.sh --expect-digest takes
 
 The archive is deterministic (sorted entries, fixed timestamps, root ownership,
 gzip header without a timestamp): the same sources built with the same
@@ -100,10 +105,12 @@ def build(out_dir, quiet=False):
     archive_sha = hashlib.sha256(compressed.getvalue()).hexdigest()
     (out_dir / (archive.name + ".sha256")).write_text("%s  %s\n" % (archive_sha, archive.name))
     digest = hashlib.sha256(sums).hexdigest()
+    # sha256sum format, checkable after extraction: sha256sum -c <this file>
+    (out_dir / ("%s.SHA256SUMS.sha256" % top)).write_text("%s  %s/SHA256SUMS\n" % (digest, top))
     if not quiet:
         print("archive        : %s" % archive)
-        print("archive sha256 : %s" % archive_sha)
-        print("bundle digest  : %s  (install.sh --expect-digest)" % digest)
+        print("archive SHA-256              : %s  (%s.sha256)" % (archive_sha, archive.name))
+        print("bundle digest (--expect-digest): %s  (%s.SHA256SUMS.sha256)" % (digest, top))
     return archive, archive_sha, digest
 
 
