@@ -27,8 +27,59 @@ either drive is ever executed.
   `mkfs.vfat` (only for `prepare-clean-usb`).
 - Clean USB drive with FAT32 or exFAT that reports a serial number.
 
-Nothing is installed, and no services, cron jobs, udev rules or desktop
-settings are created or changed.
+The airlock itself installs nothing, and no services, cron jobs, udev rules
+or desktop settings are created or changed.
+
+## Installation from the release bundle
+
+The bundle `mx_usb_airlock-<version>.tar.gz` contains the application, the
+docs, the tests, `LICENSE`, `install.sh` and a `SHA256SUMS` file.
+
+1. Check the archive on a trusted machine, and record the hash somewhere
+   other than the USB drive you carry it on:
+   `sha256sum -c mx_usb_airlock-1.0.0.tar.gz.sha256`
+2. On the live system:
+   ```
+   tar -xzf mx_usb_airlock-1.0.0.tar.gz
+   cd mx_usb_airlock-1.0.0
+   sudo ./install.sh --expect-digest <bundle digest you recorded>
+   ```
+   The installer:
+   - checks every file against `SHA256SUMS` and accepts only the expected
+     file list
+   - checks the bundle digest (the SHA-256 of `SHA256SUMS`)
+   - checks Python 3.9+ and the required tools
+   - runs the bundled test suite (simulation only)
+   - installs into a staging directory, re-verifies it, and swaps it into
+     `/opt/mx_usb_airlock`
+   - writes the launcher `/usr/local/bin/mx-usb-airlock`, which runs
+     `python3 -I -B .../airlock.py`
+3. Run `mx-usb-airlock status`. Every `python3 -I -B airlock.py <command>`
+   below can be written as `mx-usb-airlock <command>`.
+
+Installer options:
+
+| Option | Effect |
+|---|---|
+| `--check-only` | Verify the bundle and prerequisites and run the tests; change nothing |
+| `--uninstall` | Remove an installation made by this script |
+| `--prefix DIR` / `--bin-dir DIR` | Install somewhere else |
+| `--skip-tests` | Do not run the test suite first |
+| `--yes` | Do not ask for confirmation |
+
+Without `sudo`, the installer puts files in `~/.local/share/mx_usb_airlock`
+and `~/.local/bin`. That works, but any program running as you could then
+modify the files, so the system install is recommended.
+
+The installer never downloads anything, never installs packages (it only
+reports missing tools), never edits shell profiles, and refuses to overwrite
+a directory or launcher it did not create. On a live session the
+installation lasts until reboot.
+
+To rebuild the bundle from source, run
+`python3 -I -B tools/make_bundle.py`. The output goes to `dist/` and is
+byte-identical when built with the same Python/zlib, so you can check a
+published bundle by rebuilding it.
 
 ## Operational workflow (exact steps)
 

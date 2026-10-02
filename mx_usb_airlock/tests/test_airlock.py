@@ -1175,6 +1175,16 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("More than one removable storage device", h.output())
 
 
+class ConsoleTests(unittest.TestCase):
+    def test_broken_pipe_does_not_abort(self):
+        class ClosedPipe(io.StringIO):
+            def write(self, text):
+                raise BrokenPipeError(32, "Broken pipe")
+        console = A.Console(input_fn=lambda p: "", out=ClosedPipe(), interactive=False, color=False)
+        console.blocking("still running")
+        console.line("more output")
+
+
 class SourceHygieneTests(unittest.TestCase):
     def sources(self):
         files = [HERE.parent / "airlock.py"] + sorted(HERE.glob("*.py"))
@@ -1189,10 +1199,18 @@ class SourceHygieneTests(unittest.TestCase):
             self.assertNotIn("os." + "system", text, str(path))
             self.assertNotIn("bash" + " -c", text, str(path))
 
-    def test_launcher_if_present_has_no_backticks(self):
-        launcher = HERE.parent / "run-airlock.sh"
-        if launcher.exists():
-            self.assertNotIn(chr(0x60), launcher.read_text())
+    def test_shell_scripts_hygiene(self):
+        scripts = [p for p in (HERE.parent / "install.sh", HERE.parent / "run-airlock.sh") if p.exists()]
+        builder = HERE.parent / "tools" / "make_bundle.py"
+        if builder.exists():
+            scripts.append(builder)
+        for path in scripts:
+            text = path.read_text()
+            self.assertNotIn(chr(0x60), text, str(path))
+            self.assertIsNone(re.search(r"\beval\b", text), str(path))
+            self.assertNotIn("bash" + " -c", text, str(path))
+            self.assertIsNone(re.search(r"\b(?:curl|wget|apt-get|apt\s+install\s+-y)\b", text), str(path))
+            self.assertNotIn("chmod 777", text, str(path))
 
 
 @unittest.skipUnless(sys.platform.startswith("linux") and A.find_tool("lsblk"), "requires Linux with lsblk")

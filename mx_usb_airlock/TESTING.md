@@ -54,6 +54,22 @@ there are no backticks, no `shell=True`, and no eval, exec, pickle,
 `os.system` or `bash -c`. It also checks that no shell interpretation happens
 (shell metacharacters are passed literally to a real `echo`).
 
+### Bundle and installer (`tests/test_install.py`)
+
+These tests build the release tarball into a temporary directory, extract it,
+and run `install.sh` against temporary prefixes. They check:
+
+- the build is reproducible, and the archive holds only root-owned regular
+  files and directories with relative paths
+- install, upgrade and uninstall work, and the launcher runs `-I -B`
+- tampered files, missing files and a wrong `--expect-digest` are refused
+- an unmanaged prefix or launcher is never overwritten
+- unsafe paths are rejected
+- `--check-only` changes nothing
+- a non-interactive run without `--yes` is cancelled
+
+They are skipped inside an installed bundle, because `tools/` is not shipped.
+
 ## Practice run with the simulator (CLI)
 
 ```

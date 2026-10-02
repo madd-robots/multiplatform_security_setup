@@ -310,11 +310,25 @@ class Console:
         self.color = color
 
     def line(self, text: str = "") -> None:
-        print(text, file=self.out)
         try:
+            print(text, file=self.out)
             self.out.flush()
+        except BrokenPipeError:
+            # The reader went away (for example "| head").  Keep running so
+            # cleanup (unmounting) and fail-closed handling still complete.
+            self._discard_output()
         except (AttributeError, ValueError):
             pass
+
+    def _discard_output(self) -> None:
+        if self.out is sys.stdout:
+            try:
+                devnull = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull, sys.stdout.fileno())
+                os.close(devnull)
+            except (OSError, ValueError, AttributeError):
+                pass
+        self.out = open(os.devnull, "w", encoding="utf-8")
 
     def _tag(self, tag: str, text: str, code: str) -> None:
         label = "[%s]" % tag
