@@ -1,0 +1,15 @@
+{
+  "_comment": "Inert JSON configuration. Unknown keys are rejected. Extensions on the built-in deny list (executables, scripts for other interpreters, archives, images, Office documents) cannot be added here.",
+  "allowed_extensions": ["ps1", "txt", "md", "json", "sha256", "sha256sum", "csv"],
+  "max_file_bytes": 2097152,
+  "max_total_bytes": 33554432,
+  "max_files": 200,
+  "max_scan_entries": 5000,
+  "max_depth": 6,
+  "max_name_length": 128,
+  "allow_non_ascii_names": false,
+  "require_trusted_hashes": false,
+  "compute_sha512": true,
+  "clamav_enabled": true,
+  "destination_dir_name": "RECOVERY_TRANSFER"
+}
