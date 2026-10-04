@@ -1,0 +1,404 @@
+#!/usr/bin/env bash
+# secure-debian-bootstrap - defensive APT repository recovery and baseline
+# hardening for Debian-derived systems and Termux.
+#
+# Default mode is a non-destructive audit. No system change happens without an
+# explicit apply mode.
+#
+# Minimum bash: 4.4
+# ShellCheck cannot see cross-file use in a sourced library, so variables set
+# here and read elsewhere (and vice versa) look unused to it. This is the
+# project's one narrowly-justified exception, per docs/operator-guide.md.
+# shellcheck disable=SC2034,SC2153
+set -Eeuo pipefail
+
+SDB_VERSION="1.0.0"
+SDB_SELF=${0##*/}
+SDB_RUN_STARTED=$(date -u +%FT%TZ)
+
+# ---------------------------------------------------------------------------
+# Locate the project root from this script's real location, without following
+# an attacker-controlled symlink chain blindly.
+# ---------------------------------------------------------------------------
+_sdb_bootstrap_root() {
+    local src=${BASH_SOURCE[0]} dir
+    local depth=0
+    while [[ -L $src ]]; do
+        depth=$((depth + 1))
+        ((depth > 16)) && { printf 'symlink loop resolving %s\n' "${BASH_SOURCE[0]}" >&2; exit 1; }
+        dir=$(cd -P -- "$(dirname -- "$src")" && pwd)
+        src=$(readlink -- "$src")
+        [[ $src != /* ]] && src="${dir}/${src}"
+    done
+    dir=$(cd -P -- "$(dirname -- "$src")/.." && pwd)
+    printf '%s' "$dir"
+}
+SDB_ROOT_DIR=$(_sdb_bootstrap_root)
+readonly SDB_ROOT_DIR SDB_VERSION SDB_SELF
+
+# ---------------------------------------------------------------------------
+# Load libraries. These are project files, not system configuration - sourcing
+# them is the only sourcing this tool does, and it never sources anything from
+# an APT directory or from a path supplied at run time.
+# ---------------------------------------------------------------------------
+for _lib in common logging detect-platform preflight inventory repository-audit \
+            backup quarantine repository-rebuild repository-validate \
+            package-trust baseline-hardening rollback reporting; do
+    _libfile="${SDB_ROOT_DIR}/lib/${_lib}.sh"
+    [[ -r $_libfile ]] || { printf 'missing library: %s\n' "$_libfile" >&2; exit 1; }
+    # shellcheck source=/dev/null
+    . "$_libfile"
+done
+unset _lib _libfile
+
+sdb_strict_mode
+
+usage() {
+    cat <<EOF
+${SDB_SELF} ${SDB_VERSION} - defensive APT repository recovery and baseline hardening
+
+USAGE
+  ${SDB_SELF} [MODE] [OPTIONS]
+
+MODES (default: --audit, which changes nothing)
+  --audit                     Inspect and report. No changes. (default)
+  --backup-only               Take a verified backup of the APT configuration.
+  --repair-repositories       Backup, quarantine, rebuild, validate, activate.
+  --validate-repositories     Validate the CURRENT configuration; change nothing.
+  --apply-baseline-hardening  Apply the platform's baseline controls.
+  --full                      All of the above, in clearly reported stages.
+  --rollback BACKUP_ID        Restore a verified backup.
+  --report                    Re-print the report for the most recent run.
+  --list-backups              List available backups.
+
+OPTIONS
+  --dry-run                   Show every planned change; make none.
+  --yes                       Answer routine prompts with yes. Cannot override
+                              ambiguous detection, EOL releases, failed
+                              validation, unsafe paths, or a missing backup.
+  --non-interactive           Never prompt; fail closed on any decision.
+  --strict                    Exit non-zero if the audit finds high-severity issues.
+  --allow-secondary-template  Permit activation of a template whose repository
+                              facts were not verified against a vendor source.
+  --use-archive-repositories  Permit archive repositories for an EOL release.
+  --no-network                Skip network validation (staged config unproven).
+  --state-dir DIR             Where runs, backups, and quarantine live.
+  --sys-root DIR              Treat DIR as the system root instead of /. For
+                              chroot repair and for the test suite; the write
+                              guard follows it, so nothing outside DIR is touched.
+  --config FILE               Additional configuration file (read as data).
+  --verbose                   More detail.
+  --debug                     Full trace-level detail.
+  --version                   Print version and exit.
+  -h, --help                  This help.
+
+EXAMPLES
+  ${SDB_SELF}                                    # safe: audit only
+  ${SDB_SELF} --repair-repositories --dry-run    # show exactly what would change
+  sudo ${SDB_SELF} --repair-repositories         # repair, with backup + validation
+  sudo ${SDB_SELF} --rollback 20260806T170000Z-1a2b3c4d
+
+Backups and logs default to /var/lib/secure-debian-bootstrap
+(\$PREFIX/var/lib/secure-debian-bootstrap on Termux).
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Configuration files are read as data. Only known keys are accepted; a value
+# containing shell metacharacters is rejected rather than interpreted.
+# ---------------------------------------------------------------------------
+sdb_load_config() {
+    local file=${1:?} line key value
+    [[ -r $file ]] || return 0
+    while IFS= read -r line || [[ -n $line ]]; do
+        line=${line%%#*}
+        line=$(sdb_trim "$line")
+        [[ -z $line || $line != *=* ]] && continue
+        key=$(sdb_trim "${line%%=*}")
+        value=$(sdb_trim "${line#*=}")
+        value=${value%\"}; value=${value#\"}
+        # Single quotes are intentional: these are literal metacharacters to
+        # match, not expressions to expand.
+        # shellcheck disable=SC2016
+        case $value in
+            *'$('*|*'`'*|*';'*|*'|'*|*'&'*)
+                printf 'ignoring configuration value with shell metacharacters: %s\n' "$key" >&2
+                continue ;;
+        esac
+        case $key in
+            SDB_MIN_CONFIDENCE|SDB_NO_NETWORK|SDB_ALLOW_SECONDARY_TEMPLATE|\
+            SDB_USE_ARCHIVE_REPOSITORIES|SDB_PARROT_ENABLE_BACKPORTS|\
+            SDB_HARDENING_ACCEPT_OPTIN)
+                [[ $value =~ ^[0-9]+$ ]] && printf -v "$key" '%s' "$value" ;;
+            SDB_STATE_DIR)
+                [[ $value == /* ]] && printf -v "$key" '%s' "$value" ;;
+            SDB_HARDENING_SKIP|SDB_HARDENING_EXTRA)
+                printf -v "$key" '%s' "$value" ;;
+            *)
+                printf 'ignoring unknown configuration key: %s\n' "$key" >&2 ;;
+        esac
+    done <"$file"
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+SDB_MODE="audit"
+SDB_ROLLBACK_ID=""
+SDB_EXTRA_CONFIG=""
+SDB_STATE_DIR_OVERRIDE=""
+
+# Options given on the command line are recorded here and re-applied after the
+# configuration files are read, so a config file can never silently override an
+# explicit flag (a --no-network or --dry-run that is quietly ignored would be a
+# safety bug, not a cosmetic one).
+declare -A SDB_CLI_SET=()
+cli() { SDB_CLI_SET[$1]=$2; printf -v "$1" '%s' "$2"; }
+sdb_apply_cli_overrides() {
+    local key
+    for key in "${!SDB_CLI_SET[@]}"; do
+        printf -v "$key" '%s' "${SDB_CLI_SET[$key]}"
+    done
+}
+
+parse_args() {
+    while (($#)); do
+        case $1 in
+            --audit)                    SDB_MODE="audit" ;;
+            --backup-only)              SDB_MODE="backup" ;;
+            --repair-repositories)      SDB_MODE="repair" ;;
+            --validate-repositories)    SDB_MODE="validate" ;;
+            --apply-baseline-hardening) SDB_MODE="harden" ;;
+            --full)                     SDB_MODE="full" ;;
+            --report)                   SDB_MODE="report" ;;
+            --list-backups)             SDB_MODE="list-backups" ;;
+            --rollback)
+                SDB_MODE="rollback"
+                [[ ${2:-} ]] || { printf '--rollback requires a BACKUP_ID\n' >&2; exit "$SDB_EX_USAGE"; }
+                SDB_ROLLBACK_ID=$2; shift ;;
+            --dry-run)                  cli SDB_DRY_RUN 1 ;;
+            --yes|-y)                   cli SDB_ASSUME_YES 1 ;;
+            --non-interactive)          cli SDB_NON_INTERACTIVE 1 ;;
+            --strict)                   cli SDB_STRICT 1 ;;
+            --allow-secondary-template) cli SDB_ALLOW_SECONDARY_TEMPLATE 1 ;;
+            --use-archive-repositories) cli SDB_USE_ARCHIVE_REPOSITORIES 1 ;;
+            --no-network)               cli SDB_NO_NETWORK 1 ;;
+            --sys-root)
+                [[ ${2:-} ]] || { printf -- '--sys-root requires a directory\n' >&2; exit "$SDB_EX_USAGE"; }
+                SDB_SYS_ROOT=$2; shift ;;
+            --state-dir)
+                [[ ${2:-} ]] || { printf '--state-dir requires a directory\n' >&2; exit "$SDB_EX_USAGE"; }
+                SDB_STATE_DIR_OVERRIDE=$2; shift ;;
+            --config)
+                [[ ${2:-} ]] || { printf '--config requires a file\n' >&2; exit "$SDB_EX_USAGE"; }
+                SDB_EXTRA_CONFIG=$2; shift ;;
+            --verbose|-v)               SDB_VERBOSE=1 ;;
+            --debug)                    SDB_DEBUG=1; SDB_VERBOSE=1 ;;
+            --version)                  printf '%s %s\n' "$SDB_SELF" "$SDB_VERSION"; exit 0 ;;
+            -h|--help)                  usage; exit 0 ;;
+            --) shift; break ;;
+            -*) printf 'unknown option: %s\n' "$1" >&2; usage >&2; exit "$SDB_EX_USAGE" ;;
+            *)  printf 'unexpected argument: %s\n' "$1" >&2; exit "$SDB_EX_USAGE" ;;
+        esac
+        shift
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Stage sequences
+# ---------------------------------------------------------------------------
+
+stage_discover() {
+    sdb_preflight
+    sdb_detect_platform
+    sdb_init_privilege
+    # Privilege detection can change the roots (Termux never escalates), so
+    # re-resolve them and load the platform module afterwards.
+    _sdb_finalise_roots
+    sdb_load_platform_module
+    sdb_detection_json "${SDB_RUN_DIR}/detection.json"
+    sdb_log_stage "detection"
+    sdb_detection_report | while IFS= read -r line; do sdb_log_info "$line"; done
+    sdb_preflight_apt_root
+    sdb_platform_call preflight
+}
+
+sdb_load_platform_module() {
+    local module="${SDB_ROOT_DIR}/lib/platforms/${SDB_PLATFORM}.sh"
+    if [[ $SDB_PLATFORM == "unknown" || -z $SDB_PLATFORM ]]; then
+        return 0
+    fi
+    if [[ ! -r $module ]]; then
+        sdb_log_warn "no platform module for '${SDB_PLATFORM}' (${module})"
+        return 0
+    fi
+    # shellcheck source=/dev/null
+    . "$module"
+    sdb_log_verbose "loaded platform module: ${module}"
+}
+
+stage_audit() {
+    sdb_inventory_run
+    sdb_parse_repositories
+    sdb_audit_run
+    sdb_package_trust_run
+}
+
+stage_backup() {
+    sdb_require_confident_platform
+    sdb_backup_create
+}
+
+SDB_DEFERRED_EXIT=0
+
+stage_repair() {
+    sdb_require_confident_platform
+    sdb_require_backup
+    sdb_quarantine_from_findings
+    sdb_quarantine_third_party
+    sdb_rebuild_run
+    if ! sdb_validate_run; then
+        if ((SDB_DRY_RUN)); then
+            # A dry run exists to show the operator the whole picture, so it
+            # finishes and reports rather than stopping at the first failure.
+            sdb_log_error "validation failed; in a real run nothing would have been activated"
+            SDB_DEFERRED_EXIT=$SDB_EX_VALIDATE
+            return 0
+        fi
+        sdb_die "$SDB_EX_VALIDATE" \
+            "staged configuration failed validation; nothing was activated and the live configuration is unchanged"
+    fi
+    sdb_activate_run
+    # Re-validate the now-live configuration.
+    if ((! SDB_DRY_RUN)) && sdb_have apt-get && ((! SDB_NO_NETWORK)); then
+        sdb_log_info "verifying the activated configuration"
+        if sdb_privileged apt-get -o Acquire::AllowInsecureRepositories=false update >/dev/null 2>&1; then
+            sdb_log_ok "activated configuration updates cleanly"
+        else
+            sdb_log_error "the activated configuration failed apt-get update"
+            sdb_log_error "restoring backup ${SDB_BACKUP_ID}"
+            sdb_rollback_apply "$SDB_BACKUP_ID"
+            sdb_die "$SDB_EX_VALIDATE" "repair rolled back after post-activation failure"
+        fi
+    fi
+}
+
+main() {
+    parse_args "$@"
+
+    sdb_load_config "${SDB_ROOT_DIR}/config/defaults.conf"
+    [[ -r "${SDB_ROOT_DIR}/config/hardening.conf" ]] && \
+        sdb_load_config "${SDB_ROOT_DIR}/config/hardening.conf"
+    [[ -n $SDB_EXTRA_CONFIG ]] && sdb_load_config "$SDB_EXTRA_CONFIG"
+    sdb_apply_cli_overrides
+
+    # State directory: platform-appropriate default, overridable.
+    if [[ -n $SDB_STATE_DIR_OVERRIDE ]]; then
+        SDB_STATE_DIR=$SDB_STATE_DIR_OVERRIDE
+    elif [[ -z ${SDB_STATE_DIR:-} ]]; then
+        if [[ -n ${PREFIX:-} && -d "${PREFIX}/var" ]]; then
+            SDB_STATE_DIR="${PREFIX}/var/lib/secure-debian-bootstrap"
+        else
+            SDB_STATE_DIR="/var/lib/secure-debian-bootstrap"
+        fi
+    fi
+
+    sdb_preflight_bash_version
+    sdb_resolve_cmd date mkdir >/dev/null 2>&1 || true
+    sdb_preflight_state_dir "$SDB_STATE_DIR"
+    sdb_init_workspace "$SDB_STATE_DIR"
+    sdb_log_init "$SDB_RUN_DIR"
+    sdb_install_traps
+
+    sdb_log_info "${SDB_SELF} ${SDB_VERSION}, run ${SDB_RUN_ID}, mode ${SDB_MODE}$( ((SDB_DRY_RUN)) && printf ' (dry run)')"
+    sdb_log_info "state directory: ${SDB_STATE_DIR}"
+
+    # Modes that modify take the lock. Read-only modes do not block each other.
+    case $SDB_MODE in
+        repair|harden|full|rollback|backup) sdb_acquire_lock "$SDB_STATE_DIR" ;;
+    esac
+
+    case $SDB_MODE in
+        list-backups)
+            sdb_backup_list
+            exit 0 ;;
+        report)
+            local latest
+            latest=$(sdb_cmd find "${SDB_STATE_DIR}/runs" -maxdepth 1 -type d -name '20*' 2>/dev/null | sort | tail -1)
+            [[ -n $latest && -r "${latest}/report.txt" ]] || \
+                sdb_die "$SDB_EX_FAIL" "no previous report found under ${SDB_STATE_DIR}/runs"
+            cat "${latest}/report.txt"
+            exit 0 ;;
+    esac
+
+    stage_discover
+
+    case $SDB_MODE in
+        audit)
+            stage_audit
+            ;;
+        backup)
+            stage_audit
+            stage_backup
+            ;;
+        validate)
+            stage_audit
+            sdb_log_stage "validate current configuration"
+            if sdb_have apt-get && ((! SDB_NO_NETWORK)); then
+                if sdb_cmd apt-get -o Acquire::AllowInsecureRepositories=false \
+                       -o Debug::NoLocking=true update >/dev/null 2>&1; then
+                    sdb_log_ok "the current configuration updates cleanly"
+                else
+                    sdb_log_error "the current configuration fails apt-get update"
+                    sdb_log_finding high "apt_update_fails" "$SDB_APT_ETC" \
+                        "the live configuration cannot fetch or verify repository metadata"
+                fi
+            else
+                sdb_log_warn "network validation skipped"
+            fi
+            ;;
+        repair)
+            stage_audit
+            stage_backup
+            stage_repair
+            ;;
+        harden)
+            stage_audit
+            stage_backup
+            sdb_hardening_run
+            ;;
+        full)
+            stage_audit
+            stage_backup
+            stage_repair
+            sdb_hardening_run
+            ;;
+        rollback)
+            sdb_rollback_apply "$SDB_ROLLBACK_ID"
+            ;;
+        *)
+            sdb_die "$SDB_EX_USAGE" "unknown mode: ${SDB_MODE}"
+            ;;
+    esac
+
+    sdb_report_run
+
+    if ((SDB_DRY_RUN)); then
+        sdb_log_ok "dry run complete: ${#SDB_PLAN[@]} planned change(s), 0 applied"
+    fi
+
+    if ((SDB_DEFERRED_EXIT != 0)); then
+        trap - ERR
+        exit "$SDB_DEFERRED_EXIT"
+    fi
+
+    if ((SDB_STRICT && SDB_FINDINGS_HIGH > 0)); then
+        sdb_log_error "--strict: ${SDB_FINDINGS_HIGH} high-severity finding(s)"
+        trap - ERR
+        exit "$SDB_EX_FINDINGS"
+    fi
+    trap - ERR
+    exit "$SDB_EX_OK"
+}
+
+main "$@"

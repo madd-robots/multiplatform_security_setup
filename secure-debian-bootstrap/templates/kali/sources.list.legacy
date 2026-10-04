@@ -1,0 +1,3 @@
+# Kali Linux network repository, pre-2026.2 one-line format.
+# Verbatim from the official Kali documentation source, 2026-08-06.
+deb http://http.kali.org/kali @KALI_SUITE@ main contrib non-free non-free-firmware

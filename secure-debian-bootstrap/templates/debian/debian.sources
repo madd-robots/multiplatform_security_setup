@@ -1,0 +1,14 @@
+# Debian repositories.
+# CONFIDENCE: secondary - see templates/debian/TEMPLATE.meta and
+# docs/research-sources.md section 3.5. Verify before activating.
+Types: deb
+URIs: http://deb.debian.org/debian/
+Suites: @CODENAME@ @CODENAME@-updates
+Components: @COMPONENTS@
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+
+Types: deb
+URIs: http://security.debian.org/debian-security/
+Suites: @CODENAME@-security
+Components: @COMPONENTS@
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg

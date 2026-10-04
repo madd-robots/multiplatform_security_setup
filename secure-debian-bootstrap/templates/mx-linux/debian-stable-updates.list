@@ -1,0 +1,3 @@
+# Debian stable-updates, as used by MX Linux.
+# CONFIDENCE: secondary - see templates/mx-linux/TEMPLATE.meta.
+deb http://deb.debian.org/debian/ @CODENAME@-updates main contrib non-free non-free-firmware
