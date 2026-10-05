@@ -1,5 +1,30 @@
 # Security model (Stages 1 and 2)
 
+## Threat model (owner decision D1, see ROADMAP.md)
+
+Guardian runs on hosts that may be compromised. The attacker may watch the
+screen and log every keystroke. The goal is **integrity**: proof that data
+and deployments were not altered. Secrecy comes second.
+
+- No passwords, passphrases or PINs are ever asked for or shown. The owner's
+  authority is a physical touch on an enrolled YubiKey, and the signing keys
+  never leave the keys.
+- Checking a signature needs only public keys, so a compromised host cannot
+  gain anything by watching verification.
+- **The limit no design removes: what you touch to sign is not what you
+  see.** A YubiKey has no screen. Malware on the host can swap the digest
+  sent to the key, and the touch then signs the attacker's content. Each
+  touch yields at most one signature, but every signature needs a touch.
+  Rules that follow from this:
+  1. Sign only from a known-good environment: the Guardian Rescue USB,
+     booted read-only, never an everyday installed OS.
+  2. Verify on a second, independent Guardian instance (for example the
+     Termux spinoff) before trusting anything that was signed.
+  3. Every signature is recorded in the signed, hash-chained audit ledger,
+     so an unexpected signature shows up afterwards.
+- On a compromised host, Guardian's own display of a result can be forged.
+  A verification only counts when it runs on an instance you trust.
+
 ## Trust boundaries
 
 ```

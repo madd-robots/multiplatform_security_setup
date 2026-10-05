@@ -6,7 +6,7 @@ Windows. The full plan, stage status and the design changes made along the way
 are in [ROADMAP.md](ROADMAP.md). Read [SECURITY_MODEL.md](SECURITY_MODEL.md)
 for what the code guarantees today and what it does not.
 
-**Status: Stages 1 and 2 of 9 are implemented.** There is no device analysis,
+**Status: Stages 1 and 2 of 9 are implemented.** The owner decisions in ROADMAP.md (integrity-first threat model, touch-only YubiKeys, dedicated drives) govern the remaining stages. There is no device analysis,
 encryption or YubiKey support yet. Each of those is a later stage, and the
 operations that need them are refused by design until they exist.
 
