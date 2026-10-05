@@ -10,7 +10,7 @@ records where the implementation deviates from it and why.
 | 1 Foundation | common library, errors, canonical serialization, safe filenames, logging, tests | **Done** (`usbguardian/common`) |
 | 2 Security runtime | privilege separation, broker, worker isolation, IPC, authorization | **Done**, with the hardening listed below still open (`usbguardian/runtime`) |
 | 3 Device engine | USB detection, storage identity, vendor and controller data, capacity verification | Not started |
-| 4 Encryption vault | file encryption, key management, rotation, locking | Not started |
+| 4 Integrity vault (D1, D6) | custody object store, transfer package format, read-back verification, optional encryption, key management, rotation, locking | Not started |
 | 5 YubiKey integration | enrollment, authentication, owner verification | Not started |
 | 6 Guardian Forge | spinoff packages, signing, encryption | Not started |
 | 7 Platforms | Debian/MX, then Termux, then Windows | Not started |
@@ -50,9 +50,10 @@ tampered with. As a result:
 - Guardian never asks for a password, passphrase or PIN, and never shows a
   secret on screen. What an observer sees or types gives them nothing that
   lets them forge anything.
-- Everything Guardian produces or accepts carries a signature made on a
-  YubiKey: files, manifests, deployment packages, epochs, revocations and
-  audit entries. Signatures use the Stage 1 canonical encoding and domain
+- Everything Guardian produces carries a signature made on a YubiKey:
+  custody manifests, transfer packages, deployment packages, epochs,
+  revocations and audit entries. Incoming data does not need to be signed.
+  Guardian establishes its own integrity identity at intake (D6). Signatures use the Stage 1 canonical encoding and domain
   tags. Checking a signature needs only the enrolled public keys, never a
   YubiKey or a secret. That means Termux and Windows spinoffs can verify
   everything offline.
@@ -71,14 +72,21 @@ physical touch. The trade-off is accepted: whoever holds a key can sign
 with it. A keylogger would capture a PIN on a compromised host anyway, so a
 PIN adds little here.
 
-**D3. Two keys: either key alone works, and a lost key can be revoked.**
-Key A is the daily key. Key B is the backup and is kept offline. Either key
-can sign anything on its own. Recommended default for revocation: **only
-the backup (B) can revoke or replace the daily key (A); A cannot revoke B.**
-With symmetric revocation, a thief holding A could revoke B first and lock
-the owner out. If B itself is lost, the owner re-roots trust by reinstalling
-the trust anchor from known-good media. Confirm or change this before
-Stage 5.
+**D3. Two keys: either key alone works; either can revoke and replace the other.**
+*(Settled 2026-10-05. This supersedes the earlier asymmetric recommendation.)*
+- Either enrolled key independently authorizes owner operations. One serves
+  as the backup for the other. Both are never required at once.
+- A lost or retired key is revoked by a revocation signed with the remaining
+  key. A replacement key is enrolled by an enrollment record signed with the
+  remaining key. There is no password, PIN or recovery-phrase fallback.
+- Serial numbers are identifiers only. Authentication is always fresh
+  cryptographic proof from an enrolled key, with touch required for
+  sensitive operations (D2).
+- Accepted risk: someone who steals one key can revoke the other first.
+  Mitigation inside the existing design: revocations and enrollments are
+  accepted only when signed from the known-good boot (D1), are recorded in
+  the audit ledger, and are shown on the second-instance verification. If
+  both keys are lost or contested, trust is re-rooted from known-good media.
 
 **D4. Guardian drives are dedicated and may be destroyed and rebuilt freely.**
 Only drives used for Guardian are ever plugged in. Whatever it takes to make
@@ -106,6 +114,14 @@ it. The required preparation sequence is:
 5. **Verify on every later insertion**, on any Guardian instance, using only
    the public keys.
 
+Drive identity (D4): every step re-checks the device's identity
+fingerprint. A drive whose observable identity or expected state changes
+between steps or insertions is rejected. Encryption from first provisioning
+remains an option (D1); integrity never depends on it.
+
+D4 is about the *drive*. It never touches payload bytes, which may
+themselves be malicious and are preserved exactly (D6).
+
 Limit that no software can remove: a stick's controller firmware and its
 spare (over-provisioned) flash are out of reach of the host. Malicious
 firmware could misreport its interfaces later or return different data to
@@ -116,6 +132,49 @@ write-protect switch for read-only roles such as the Rescue USB.
 
 **D5 (pending).** Offline revocation and certificate expiry for spinoffs
 (design review item 5) is waiting on the owner.
+
+**D6. Custody integrity: Guardian attests custody, not provenance.**
+*(Settled 2026-10-05.)*
+Guardian is responsible for data only from the moment it accepts it. It
+makes no claim that incoming data was correct, authentic or clean. What it
+guarantees is that the receiving Guardian releases exactly the bytes the
+sending Guardian accepted, and fails closed otherwise.
+
+1. **Payload bytes are opaque and never modified.** There is no
+   normalization, repair, re-encoding, sanitization or newline conversion of
+   payload bytes. A future transformation must produce a new object with its
+   own integrity identity and a recorded link to its source.
+2. **Identity at intake.** Guardian streams SHA-256 over the exact bytes and
+   records the exact length. A canonical custody manifest (Stage 1 encoding,
+   domain tag `guardian/custody/v1`) binds the payload digest and length, the
+   format version, immutable transfer metadata (transfer id, intake time,
+   source name as data), and the sending instance and key identity. The
+   manifest is signed with an owner key (Stage 5).
+3. **Untrusted metadata is never evidence.** Filenames, timestamps, sizes
+   reported by the OS and directory listings never replace digest and length
+   checks. Original filenames are recorded in the manifest as data. Release
+   writes under a validated name. If the original name is unsafe for the
+   target filesystem, the release refuses it or uses a Guardian-generated
+   name, and the manifest keeps the original. Payload bytes are unaffected
+   either way.
+4. **USB read-back.** After writing a transfer, Guardian reads back what is
+   actually stored (bypassing the page cache, as the Stage 3 surface test
+   does) and checks it against the intake identity. A successful write call
+   is not evidence.
+5. **Receiving side.** Verify the manifest signature against the enrolled
+   keys and the revocation state. Then verify the package. If it is
+   encrypted, decrypt it. Then verify the payload digest and length again
+   before release. Any mismatch blocks the release.
+6. **Payloads never travel through JSON IPC.** They are hashed and copied as
+   streams through file descriptors. Only digests, lengths and manifests
+   cross broker/worker frames, which are limited to 1 MiB.
+
+Stage mapping: Stage 4 implements the custody object store and the
+transfer package format (2, 3, 4, 6); Stage 5 adds the signatures and key
+lifecycle; Stage 6 reuses the package format for deployments; Stage 8 adds
+artifact and erase verification reports. The verified-release design of
+`mx_usb_airlock` (whole-destination verification) is the reference.
+
 
 ## Design review of the build guide
 
