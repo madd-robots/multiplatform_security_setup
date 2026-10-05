@@ -1,4 +1,4 @@
-# Security model (Stages 1 and 2)
+# Security model (Stages 1 to 3)
 
 ## Threat model (owner decision D1, see ROADMAP.md)
 
@@ -73,6 +73,24 @@ and deployments were not altered. Secrecy comes second.
 - Logs are JSON lines in ASCII. Secret-named fields are redacted, binary data
   is never logged, untrusted text is escaped, and files are 0600, opened with
   O_NOFOLLOW and rotated.
+
+## Device engine (Stage 3)
+
+- Device-reported data (USB strings and descriptors, SCSI INQUIRY, MMC CID,
+  mount points) is parsed only in workers, with bounded reads, symlinks
+  confined to sysfs, and values kept exactly as reported. Non-UTF-8 values
+  are encoded as hex rather than altered.
+- A device fingerprint is computed from values the device reports. It
+  detects a change in presented identity. It does not prove physical
+  identity, because a malicious device can copy another's descriptors.
+- Before the destructive surface test, the broker validates the worker's
+  report and checks it against values it reads from sysfs itself (device
+  number, bus topology, holders, size). It opens the node with O_EXCL and
+  confirms its major:minor, so a lying worker cannot redirect the
+  overwrite to another disk.
+- The surface test proves the logical address space was overwritten and
+  read back correctly. It cannot reach controller firmware or spare flash
+  (ROADMAP D4).
 
 ## Known limitations (not hidden, not yet fixed)
 

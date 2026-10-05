@@ -24,6 +24,7 @@ from usbguardian.common.canonical import canonical_loads  # noqa: E402
 from usbguardian.common.errors import GuardianError  # noqa: E402
 from usbguardian.common.log import configure_logging  # noqa: E402
 from usbguardian.common.text import display_text  # noqa: E402
+from usbguardian.devices.operations import device_operations  # noqa: E402
 from usbguardian.runtime.authz import Policy  # noqa: E402
 from usbguardian.runtime.broker import Broker, default_operations  # noqa: E402
 from usbguardian.runtime.client import BrokerClient  # noqa: E402
@@ -47,7 +48,8 @@ def cmd_broker(args: argparse.Namespace) -> int:
         print("WARNING: development mode. Workers run as your own user; the sandbox limits them but does not "
               "separate them from your files. Run the broker as root with --worker-user for real use.",
               file=sys.stderr)
-    server = BrokerServer(Broker(default_operations(), launcher), policy, Path(args.socket),
+    operations = list(default_operations()) + list(device_operations(launcher))
+    server = BrokerServer(Broker(operations, launcher), policy, Path(args.socket),
                           socket_mode=int(args.socket_mode, 8))
     signal.signal(signal.SIGTERM, lambda *_: server.stop())
     signal.signal(signal.SIGINT, lambda *_: server.stop())

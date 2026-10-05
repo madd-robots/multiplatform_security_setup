@@ -32,8 +32,10 @@ EXIT_IO_FAILED = 71
 
 
 def _registry(test_handlers: bool) -> Dict[str, Any]:
+    from ..devices.handlers import DEVICE_REGISTRY
     from .handlers import REGISTRY
     registry = dict(REGISTRY)
+    registry.update(DEVICE_REGISTRY)
     if test_handlers:
         from .testing_handlers import TEST_REGISTRY
         registry.update(TEST_REGISTRY)

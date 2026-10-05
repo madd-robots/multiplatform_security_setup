@@ -9,7 +9,7 @@ records where the implementation deviates from it and why.
 |---|---|---|
 | 1 Foundation | common library, errors, canonical serialization, safe filenames, logging, tests | **Done** (`usbguardian/common`) |
 | 2 Security runtime | privilege separation, broker, worker isolation, IPC, authorization | **Done**, with the hardening listed below still open (`usbguardian/runtime`) |
-| 3 Device engine | USB detection, storage identity, vendor and controller data, capacity verification | Not started |
+| 3 Device engine | USB detection, storage identity, vendor and controller data, capacity verification | **Done** (`usbguardian/devices`); see notes below |
 | 4 Integrity vault (D1, D6) | custody object store, transfer package format, read-back verification, optional encryption, key management, rotation, locking | Not started |
 | 5 YubiKey integration | enrollment, authentication, owner verification | Not started |
 | 6 Guardian Forge | spinoff packages, signing, encryption | Not started |
@@ -28,15 +28,43 @@ before anything can rely on it, and none was claimed as done.
 - the dedicated worker account, SysVinit service and root-owned install
   location (Stage 7 packaging)
 
-### Next: Stage 3
+### Stage 3 notes
 
-Device enumeration (`lsblk` JSON, sysfs, mountinfo) runs as worker handlers
-with `allow_subprocess` only where a tool must run. Parsing follows the
-approach that is already proven in `mx_usb_airlock`. Read-only analysis uses
-the `device.inspect` capability. Anything that writes to a device uses
-`device.modify`, which needs `owner_key` and therefore stays unavailable until
-Stage 5. Stage 3 also has to meet the drive requirements in decision D4
-below.
+- Enumeration reads sysfs and mountinfo directly inside the sandboxed
+  worker. No tools are run, because workers cannot fork.
+- Reports include USB descriptors and every interface, the SCSI INQUIRY
+  strings, the MMC CID, capacity, block sizes, partitions, holders and
+  mounts. "Controller information" means what the device exposes through
+  those standard interfaces; there is no vendor-tool access (D4).
+- Findings implement D4 step 1 at detection time: exactly one mass-storage
+  interface (bulk-only or UAS), a single configuration, and no HID, network,
+  serial or vendor interfaces. Internal, system, mounted or held disks are
+  BLOCKING.
+- The identity fingerprint (domain `guardian/device-identity/v1`) excludes
+  volatile state, so any change in presented identity is detected.
+- `device.surface_test` implements D4 step 2 (keyed full-surface write,
+  O_DIRECT read-back, capacity proof). It is bound to the fingerprint the
+  owner approved and cross-checked against kernel-side facts read by the
+  broker. It opens the device with O_EXCL, re-checks identity afterwards,
+  and needs `owner_key`, so it stays unreachable until Stage 5. It has been
+  tested only on files and in-memory fakes, and must be validated on real
+  sticks on MX before release.
+- Left for later stages, because the code that needs them lives there:
+  - kernel-level interface blocking before driver binding
+    (`authorized_default=0` / usbguard) is a host configuration change and
+    belongs to Stage 7 install
+  - layout rebuild and signed whole-volume verification (D4 steps 3–5) are
+    defined by the transfer format and belong to Stage 4
+  - the surface test runs in the broker's connection thread and is not
+    cancelled if the client disconnects; Stage 9 adds progress reporting
+
+### Next: Stage 4
+
+Integrity vault and custody store (D1, D6): content-addressed custody
+objects (streamed SHA-256 plus exact length), the canonical custody
+manifest, the transfer package format with USB read-back, the receiving-side
+verify-then-release path, and the drive layout and whole-volume
+verification (D4 steps 3–5). Manifest signing plugs in at Stage 5.
 
 ## Owner decisions (2026-10-05)
 

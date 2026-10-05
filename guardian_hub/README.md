@@ -6,7 +6,7 @@ Windows. The full plan, stage status and the design changes made along the way
 are in [ROADMAP.md](ROADMAP.md). Read [SECURITY_MODEL.md](SECURITY_MODEL.md)
 for what the code guarantees today and what it does not.
 
-**Status: Stages 1 and 2 of 9 are implemented.** The owner decisions in ROADMAP.md (integrity-first threat model, touch-only YubiKeys, dedicated drives) govern the remaining stages. There is no device analysis,
+**Status: Stages 1–3 of 9 are implemented.** The owner decisions in ROADMAP.md (integrity-first threat model, touch-only YubiKeys, dedicated drives) govern the remaining stages. There is no device analysis,
 encryption or YubiKey support yet. Each of those is a later stage, and the
 operations that need them are refused by design until they exist.
 
@@ -23,6 +23,13 @@ guardian_hub/
       fsutil.py               O_NOFOLLOW reads, atomic private writes, trusted-file checks
       log.py                  structured JSON-line logging with redaction and 0600 rotation
       text.py                 safe rendering of untrusted text
+    devices/                  Stage 3 device engine (Linux)
+      scanner.py              sysfs/mountinfo collection (runs in the worker), kernel-side facts
+      identity.py             device identity document, fingerprint, change detection
+      assess.py               findings: BadUSB interface rules, internal/system/mounted disks
+      surface.py              DESTRUCTIVE keyed full-surface write + O_DIRECT read-back
+      handlers.py             worker handlers devices.scan / devices.inspect
+      operations.py           broker ops device.list / device.inspect / device.surface_test
     runtime/                  Stage 2 security runtime (Linux)
       ipc.py                  length-prefixed canonical frames, deadlines, size bounds
       schema.py               strict validators for every message and parameter
@@ -70,7 +77,13 @@ non-root users can connect):
 ```
 sudo python3 -I -B guardian.py call runtime.status --socket /run/usbguardian/broker.sock
 sudo python3 -I -B guardian.py call runtime.sandbox_report --socket /run/usbguardian/broker.sock
+sudo python3 -I -B guardian.py call device.list --socket /run/usbguardian/broker.sock
+sudo python3 -I -B guardian.py call device.inspect --params '{"kname":"sdb"}' --socket /run/usbguardian/broker.sock
 ```
+
+`device.list` and `device.inspect` need the `device.inspect` capability.
+`device.surface_test` overwrites the whole device. It needs `device.modify`
+plus the YubiKey `owner_key` factor, so it is refused until Stage 5.
 
 Running the broker as a normal user is **development mode**. Workers then
 share your uid. They still get the resource limits and process flags, but
@@ -104,5 +117,16 @@ mode. The suite covers:
   root, crash, or emit forged, extra or garbage frames. Also covered: the
   socket server's peer identity, connection limits, malformed frames and its
   refusal to replace non-socket paths.
+- **Stage 3:** a fake sysfs tree (USB sticks, SD cards, NVMe, loop
+  devices), BadUSB interface layouts (HID, network, vendor, extra storage,
+  extra configurations), system, live, mounted and held disks, symlinks
+  escaping sysfs, bounded and non-UTF-8 attributes, identity stability and
+  change detection. Surface tests cover a clean pass, a fresh key per run,
+  counterfeit wrap-around and dropped-write capacity, single bit flips, I/O
+  errors and cancellation. The surface operation is tested for refusal on
+  identity mismatch, blocking findings, a lying worker report, kernel
+  topology disagreement and identity change mid-test, and for owner-key
+  gating through the broker. Read-only scans also run in the real sandboxed
+  worker.
 - **Hygiene:** no `shell=True`, `eval`, `exec`, `pickle`, dynamic imports or
   unbounded reads; ASCII-only, licensed, stdlib-only sources.
