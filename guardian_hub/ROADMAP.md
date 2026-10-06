@@ -15,6 +15,7 @@ records where the implementation deviates from it and why.
 | 6 Guardian Forge | spinoff creation, deployment packages, signing, registry | **Done** (`usbguardian/forge`); see notes below |
 | 7 Platforms | Debian/MX first, then Termux, then Windows | **Debian/MX done** (`usbguardian/deploy`); Termux and Windows not started, see notes |
 | 8 Device assurance | firmware and artifact verification, erase verification, reports | Audit ledger done (`usbguardian/audit`, handoff H1); reports not started |
+| Handoff | leases (D5), watchdog boundary (D8), Airlock (D10), SysVinit preflight and installer v2 (D9, D11), capsules (D7) | **Done in code and tests**; hardware gates open (see "Hardware gates" below) |
 | 9 Final UI | dashboard, managers, forge, audit viewer | Not started |
 
 ### Stage 2 hardening still open
@@ -236,8 +237,8 @@ These decisions override the build guide where the two differ.
 
 **D1. Threat model: integrity first, on a host that may be compromised.**
 Assume an attacker can watch the screen and log every keystroke. The goal is
-not secrecy. The goal is to guarantee that data has not been altered or
-tampered with. As a result:
+not secrecy. The goal is that any alteration or tampering of data is
+detected and refused. As a result:
 
 - Guardian never asks for a password, passphrase or PIN, and never shows a
   secret on screen. What an observer sees or types gives them nothing that
@@ -378,7 +379,8 @@ write-protect switch for read-only roles such as the Rescue USB.
   required by D5); a periodic Main to spinoff sync channel (reconnect is a
   manual `lease-check`); hardware validation on MX.
 
-**D7 (settled 2026-10-06, owner handoff). Encryption dependency.** No new
+**D7 (settled 2026-10-06, owner handoff; mechanics in `vault/capsule.py`,
+gate open). Encryption dependency.** No new
 general-purpose encryption framework. Approved for evaluation: `age` (already
 used by `mx_usb_airlock`) with `age-plugin-yubikey` and the PC/SC stack it
 needs (pcscd). The plugin uses PIV with PIN policy never and touch policy
@@ -460,11 +462,30 @@ update-rc.d, reboot behaviour, real dpkg output.
 5. SysVinit preflight, installer v2, uninstall, post-install and post-reboot
    validation, offline bundle (D9, D11): **done** (`usbguardian/deploy`);
    hardware validation on the MX HP pending
-6. `age` capsules behind the D7 hardware gate
-7. documentation
+6. `age` capsules behind the D7 hardware gate: **done as mechanics**
+   (`vault/capsule.py`), not offered until the gate passes
+7. documentation: **done** for this round
 
-Hardware gates (MX HP, two YubiKeys) cannot run in this development
-environment and stay open until run on the real hardware.
+**Hardware gates (open).** They cannot run in this development
+environment and stay open until run on the MX HP with both YubiKeys:
+1. *YubiKeys, read-only first:* record model, firmware, PIV support,
+   algorithms, PIN-policy and touch-policy support for both keys before any
+   provisioning (no PIN, PUK or management key on screen or in logs).
+2. *Owner authority (FIDO2/SSHSIG):* no key, key A only, key B only, both,
+   unknown key, removal mid-operation, revoked key, B after A revoked;
+   every owner operation needs a touch and nothing falls back to a password.
+3. *Capsules (D7):* provision `age-plugin-yubikey` with PIN policy never
+   and touch policy always on each key, encrypt to both, each opens alone,
+   an unrelated key cannot, no private key export, touch required, PC/SC
+   stopped gives a clear failure. Only then set `HARDWARE_GATE_PASSED`.
+4. *SysVinit:* preflight on the real system, service disabled (no start on
+   reboot), enabled (starts once), start/stop/restart without duplicates,
+   `install-validate --post-reboot`, no systemd unit, GRUB and init
+   untouched.
+5. *Airlock:* real read-only mounts (vfat, exfat, ext4 with noload, ntfs3),
+   ClamAV opening quarantine files through `/dev/fd`, a real BadUSB-like
+   composite device, GREEN detection by device number.
+6. *Leases:* machine binding values on the HP (DMI present or not).
 
 **D8 (recorded 2026-10-06). Space-exhaustion watchdog integration.**
 The owner is having an external watchdog designed elsewhere. It detects
@@ -513,7 +534,7 @@ integrating it:
 *(Settled 2026-10-05.)*
 Guardian is responsible for data only from the moment it accepts it. It
 makes no claim that incoming data was correct, authentic or clean. What it
-guarantees is that the receiving Guardian releases exactly the bytes the
+enforces is that the receiving Guardian releases exactly the bytes the
 sending Guardian accepted, and fails closed otherwise.
 
 1. **Payload bytes are opaque and never modified.** There is no

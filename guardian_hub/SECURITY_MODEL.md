@@ -1,4 +1,4 @@
-# Security model (Stages 1 to 7, audit ledger, offline leases)
+# Security model (Stages 1 to 7 and the owner handoff items)
 
 ## Threat model (owner decision D1, see ROADMAP.md)
 
@@ -97,8 +97,9 @@ and deployments were not altered. Secrecy comes second.
 ## Integrity vault (Stage 4, ROADMAP D6)
 
 - Guardian attests **custody, not provenance**. It makes no claim that
-  incoming data was correct or safe. It guarantees that the receiving
-  Guardian releases exactly the bytes the sending Guardian accepted.
+  incoming data was correct or safe. The receiving Guardian releases
+  exactly the bytes the sending Guardian accepted, or nothing (fail
+  closed).
 - Payload bytes are opaque. They are never normalized, converted or
   sanitized. Malicious content is carried unchanged, because analysing it is
   a separate job.
@@ -292,6 +293,32 @@ and deployments were not altered. Secrecy comes second.
   can still be taken between two checks. The guarantee that holds is the
   fail-closed one above, not uninterrupted service. Detecting and
   responding to fill attacks is the external watchdog's job (D8).
+
+## Capsules (ROADMAP D7, handoff H6)
+
+- **Deferred.** `vault/capsule.py` implements `age` capsules, but no broker
+  operation or command offers them until the D7 hardware test passes
+  (`HARDWARE_GATE_PASSED = False`). Guardian does not claim hardware-backed
+  encryption today.
+- Design: a capsule encrypts bytes that carry their own owner signature,
+  and the signature is verified after opening, as before: age protects
+  confidentiality, the signature protects integrity. Recipients come only
+  from an owner-signed recipient set with a recipient for every active
+  owner key, so either YubiKey alone can open a capsule; recipients of
+  revoked keys are dropped. Production accepts only `age1yubikey1`
+  recipients and plugin identity stubs, never a software secret key.
+- With PIN policy never and touch policy always, possession of the
+  YubiKey plus a deliberate touch is the factor. That is not PIN
+  protection, and is not described as such.
+
+## Hardware gates (open)
+
+Nothing below has run on the MX machine yet; each is validated here only
+with software keys, fixtures and fakes. See ROADMAP.md for the checklist.
+YubiKey touch and removal behaviour, PIV policies and age-plugin-yubikey,
+PC/SC failure handling, SysVinit service control and reboot behaviour,
+real read-only mounts, ClamAV reopening quarantine files through
+`/dev/fd`, and BadUSB detection on real devices.
 
 ## Known limitations (not hidden, not yet fixed)
 

@@ -4,11 +4,16 @@ A personal USB security and recovery platform. YubiKeys are the owner's root
 of trust, and Guardian Main builds signed spinoffs for Debian/MX, Termux and
 Windows. The full plan, stage status and the design changes made along the way
 are in [ROADMAP.md](ROADMAP.md). Read [SECURITY_MODEL.md](SECURITY_MODEL.md)
-for what the code guarantees today and what it does not.
+for what the code enforces today and what it does not.
 
-**Status: Stages 1–6 of 9 are implemented, and Stage 7 for Debian/MX.** Termux and Windows are not started. YubiKey support is tested with software keys; hardware validation on MX is pending. The owner decisions in ROADMAP.md (integrity-first threat model, touch-only YubiKeys, dedicated drives) govern the remaining stages. There is no device analysis,
-encryption or YubiKey support yet. Each of those is a later stage, and the
-operations that need them are refused by design until they exist.
+**Status.** Stages 1 to 6 are implemented, Stage 7 for Debian/MX, and the
+owner handoff items: audit ledger, offline leases (D5), watchdog boundary,
+USB Airlock (D10), SysVinit preflight and installer v2 with an offline
+bundle (D9, D11), and `age` capsule mechanics (D7). Termux, Windows, the
+Stage 8 reports and the Stage 9 UI are not started. Everything is tested
+here with software keys, fixtures and fakes; **nothing has yet run on the
+MX machine with the two YubiKeys** (see "Hardware gates" in ROADMAP.md).
+Hardware-backed encryption is not offered until the D7 gate passes.
 
 ## Layout
 
@@ -38,6 +43,7 @@ guardian_hub/
       release.py              verify-then-release via staging, no overwrite, name policy
       auth.py                 signer/verifier interface
       operations.py           vault.intake, transfer.prepare/write/verify/release (fd passing)
+      capsule.py              age capsules, owner-signed recipient sets (D7; behind the hardware gate)
     identity/                 Stage 5 YubiKey owner keys (ROADMAP D2, D3)
       sshkeys.py              strict OpenSSH public-key parsing, key ids, hardware-only policy
       sshsig.py               ssh-keygen -Y sign (touch) / verify (pipes, one key, one namespace)
@@ -91,7 +97,9 @@ guardian_hub/
 ```
 
 Requirements: Linux, Python 3.10 or newer (standard library only), and `openssh-client` for `ssh-keygen -Y`. MX Linux 23
-(Debian 12, Python 3.11) is the reference target.
+(Debian 12, Python 3.11, SysVinit) is the reference target. Optional: `clamav` (Airlock; without it every file is
+BLOCKED), `mount` (Airlock acquisition), `age` (capsules, deferred). `guardian.py inventory` lists every
+dependency the code uses, with its class and installed state.
 
 ## Owner keys (once, from the Rescue USB)
 

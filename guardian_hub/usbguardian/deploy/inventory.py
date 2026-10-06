@@ -41,11 +41,14 @@ TOOLS: Dict[str, Any] = {
     "dpkg-deb": ("dpkg", REQUIRED_INSTALLER, "offline bundle build: package metadata"),
     "apt-get": ("apt", REQUIRED_INSTALLER, "installs missing packages (authenticated, never upgrades)"),
     "adduser": ("adduser", REQUIRED_INSTALLER, "creates the dedicated worker account if missing"),
+    "age": ("age", OPTIONAL_FEATURE, "capsules (D7; deferred until the hardware gate passes)"),
+    "age-plugin-yubikey": ("age-plugin-yubikey", HARDWARE_FEATURE,
+                           "YubiKey PIV recipients for capsules (D7; deferred, not installed)"),
 }
 EXTRA_PACKAGES: List[Dict[str, str]] = [
     {"package": "libfido2-1", "class": HARDWARE_FEATURE,
      "used_for": "YubiKey FIDO2 signing through ssh-keygen (normally pulled in by openssh-client)"},
-    {"package": "pcscd", "class": HARDWARE_FEATURE, "used_for": "age-plugin-yubikey (D7, deferred; not installed)"},
+    {"package": "pcscd", "class": HARDWARE_FEATURE, "used_for": "PC/SC for age-plugin-yubikey (D7, deferred)"},
     {"package": "(none beyond the above)", "class": DEVELOPMENT_TEST,
      "used_for": "the test suite uses the standard library and ssh-keygen with software keys"},
 ]
