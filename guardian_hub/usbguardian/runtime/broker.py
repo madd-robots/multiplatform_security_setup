@@ -52,6 +52,7 @@ class Operation:
     owner_proof: Optional[OwnerProof] = None
     fds: Tuple[int, int] = (0, 0)     # allowed number of passed file descriptors
     requires_active: bool = False     # on a spinoff, runs only under an ACTIVE or EXPIRING lease (D5)
+    pause_class: Optional[str] = None  # watchdog pause class (D8): intake, transfer_write, release, device_modify
 
     def __post_init__(self) -> None:
         if not 0 <= self.fds[0] <= self.fds[1] <= ipc.MAX_FDS:
@@ -62,6 +63,8 @@ class Operation:
             raise ValueError("operation %s uses unknown capability %s" % (self.name, self.capability))
         if (self.inline is None) == (self.worker_handler is None):
             raise ValueError("operation %s needs exactly one of inline or worker_handler" % self.name)
+        if self.pause_class not in (None, "intake", "transfer_write", "release", "device_modify"):
+            raise ValueError("operation %s uses unknown pause class %s" % (self.name, self.pause_class))
         if self.worker_handler is not None and self.profile is None:
             raise ValueError("worker operation %s needs a profile" % self.name)
 
@@ -91,7 +94,7 @@ def default_operations() -> Iterable[Operation]:
 class Broker:
     def __init__(self, operations: Iterable[Operation], launcher: WorkerLauncher, *,
                  max_concurrent_workers: int = 4, logger: Optional[logging.Logger] = None,
-                 audit: Optional[Any] = None, lease_gate: Optional[Any] = None):
+                 audit: Optional[Any] = None, gates: Iterable[Any] = ()):
         self.operations: Dict[str, Operation] = {}
         for op in operations:
             if op.name in self.operations:
@@ -103,9 +106,10 @@ class Broker:
         # Audit ledger (audit/ledger.py). An allowed operation runs only after its
         # authorization was recorded; if that record cannot be written, it is refused.
         self.audit = audit
-        # Spinoffs only (lease/spinoff.py): require_active(op_name) raises unless the lease is ACTIVE.
-        # Guardian Main has no gate; it is the issuing authority.
-        self.lease_gate = lease_gate
+        # Restrict-only gates, checked after authorization and before execution. Each has
+        # check(op) and raises to refuse; none can grant anything. Today: the spinoff lease gate
+        # (lease/spinoff.py, absent on Guardian Main) and the watchdog pause (watchdog/pause.py).
+        self.gates = tuple(gates)
 
     def handle(self, principal: authz.Principal, message: Any, session: Optional[Session] = None) -> Dict[str, Any]:
         """Answer one request.  Never raises; every failure becomes an error response."""
@@ -143,8 +147,8 @@ class Broker:
             if not op.fds[0] <= nfds <= op.fds[1]:
                 raise ValidationError("operation %s takes %d..%d file descriptors" % (op_name, op.fds[0], op.fds[1]))
             params = S.validate(op.params, request["params"], "$.params")
-            if op.requires_active and self.lease_gate is not None:
-                self.lease_gate.require_active(op_name)
+            for gate in self.gates:
+                gate.check(op)
             result = self._execute(op, principal, params, session)
             response = ipc.ok_response(request_id, result)
             ipc.encode_frame(response)  # result must be canonical and fit in a frame

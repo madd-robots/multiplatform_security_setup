@@ -46,11 +46,13 @@ CAPABILITIES: Dict[str, Capability] = {c.name: c for c in (
     Capability("forge.prepare", "prepare a spinoff deployment for signing and list deployments"),
     Capability("lease.read", "read this spinoff's lease state"),
     Capability("lease.manage", "create lease requests and import owner-signed lease records"),
+    Capability("watchdog.report", "report watchdog signals (can only pause write operations)"),
     Capability("device.modify", "erase, partition or format a device", frozenset({FACTOR_OWNER_KEY})),
     Capability("vault.read", "decrypt vault contents", frozenset({FACTOR_OWNER_KEY})),
     Capability("vault.write", "encrypt into or change a vault", frozenset({FACTOR_OWNER_KEY})),
     Capability("keys.manage", "enroll, rotate or revoke keys", frozenset({FACTOR_OWNER_KEY})),
     Capability("forge.build", "build and sign spinoff deployments", frozenset({FACTOR_OWNER_KEY})),
+    Capability("watchdog.resume", "lift watchdog pauses", frozenset({FACTOR_OWNER_KEY})),
 )}
 
 MAX_POLICY_BYTES = 64 * 1024

@@ -315,6 +315,11 @@ class LeaseAuthority:
         with self._lock:
             return self._evaluate(self.clock())
 
+    def check(self, op: Operation) -> None:
+        """Broker gate (runtime/broker.py)."""
+        if op.requires_active:
+            self.require_active(op.name)
+
     def require_active(self, op_name: str) -> None:
         """Broker gate: operations that need ACTIVE authority run only in ACTIVE or EXPIRING."""
         try:

@@ -42,6 +42,8 @@ from .runtime.broker import Broker, Operation, default_operations
 from .runtime.workers import WorkerLauncher
 from .vault.custody import CustodyStore
 from .vault.operations import VaultService
+from .watchdog.adapter import WatchdogAdapter
+from .watchdog.pause import PauseController
 
 
 @dataclass
@@ -53,14 +55,19 @@ class GuardianServices:
     audit: AuditLedger
     role: str
     lease: Optional[LeaseAuthority] = None
+    watchdog: Optional[PauseController] = None
 
 
 def build_services(launcher: WorkerLauncher, state_dir: Path, *, instance_id: str = "guardian-main",
                    sig_check: Optional[SigCheck] = None,
                    allowed_key_types: FrozenSet[str] = HARDWARE_KEY_TYPES,
                    space_policy: SpacePolicy = DEFAULT_POLICY, lease_days: int = DEFAULT_LEASE_DAYS,
-                   machine_root: Path = Path("/")) -> GuardianServices:
-    """``allowed_key_types`` stays at hardware security keys outside the test suite."""
+                   machine_root: Path = Path("/"),
+                   watchdog_adapter: Optional[WatchdogAdapter] = None) -> GuardianServices:
+    """``allowed_key_types`` stays at hardware security keys outside the test suite.
+
+    ``watchdog_adapter`` is None (disabled) until a real adapter exists for a reviewed watchdog.
+    """
     state_dir = Path(state_dir)
     ensure_private_dir(state_dir)
     ensure_private_dir(state_dir / "trust")
@@ -81,11 +88,12 @@ def build_services(launcher: WorkerLauncher, state_dir: Path, *, instance_id: st
     store = CustodyStore(state_dir / "custody", space_policy=space_policy)
     owner = OwnerAuthority(trust, check, instance_id)
     audit = AuditLedger(state_dir / "audit")
+    watchdog = PauseController(state_dir / "watchdog", adapter=watchdog_adapter, audit=audit)
     operations: List[Operation] = (
         list(default_operations()) + list(device_operations(launcher)) + list(owner.operations())
         + list(TrustService(trust).operations())
         + list(VaultService(store, trust, check, instance_id, space_policy=space_policy).operations())
-        + list(AuditService(audit, trust, check).operations()))
+        + list(AuditService(audit, trust, check).operations()) + list(watchdog.operations()))
     lease: Optional[LeaseAuthority] = None
     if descriptor is None:
         role = "main"
@@ -98,5 +106,6 @@ def build_services(launcher: WorkerLauncher, state_dir: Path, *, instance_id: st
         lease = LeaseAuthority(state_dir / "lease", trust, check, instance_id=instance_id,
                                deployment_id=descriptor["deployment_id"], machine_root=machine_root, audit=audit)
         operations += list(lease.operations())
-    broker = Broker(operations, launcher, audit=audit, lease_gate=lease)
-    return GuardianServices(broker, trust, store, owner, audit, role, lease)
+    gates = (watchdog,) + ((lease,) if lease is not None else ())
+    broker = Broker(operations, launcher, audit=audit, gates=gates)
+    return GuardianServices(broker, trust, store, owner, audit, role, lease, watchdog)

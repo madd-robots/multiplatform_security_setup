@@ -159,7 +159,8 @@ class ForgeService:
                       inline=self.prepare, session_aware=True),
             Operation("forge.write", "forge.build",
                       S.Obj({"deployment_id": did, "signature": S.Str(min_len=1, max_len=MAX_SIGNATURE)}),
-                      inline=self.write, session_aware=True, owner_proof=self.write_proof, fds=(1, 1)),
+                      inline=self.write, session_aware=True, owner_proof=self.write_proof, fds=(1, 1),
+                      pause_class="transfer_write"),
             Operation("forge.list", "forge.prepare", S.EMPTY, inline=self.list),
             Operation("forge.retire", "forge.build", S.Obj({"instance_id": iid}), inline=self.retire),
         )

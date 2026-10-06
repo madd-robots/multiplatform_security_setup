@@ -57,6 +57,9 @@ guardian_hub/
       machine.py              machine binding digest (DMI, machine-id); not attestation
       spinoff.py              spinoff lease state, its own key, the ACTIVE gate, clock high-water mark
       issuer.py               Guardian Main: issue, renew, reissue, revoke; generations in the registry
+    watchdog/                 watchdog boundary (D8): disabled adapter, pause-only effect
+      adapter.py              Guardian's signal vocabulary and the adapter protocol
+      pause.py                pause classes, watchdog.report / status / resume (owner touch)
     audit/                    tamper-evident audit ledger (handoff H1)
       ledger.py               hash-chained JSON-line segments, owner-signed checkpoints
       operations.py           audit.status / entries / verify / checkpoint

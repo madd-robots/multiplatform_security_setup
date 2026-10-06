@@ -108,5 +108,5 @@ def device_operations(launcher: WorkerLauncher,
         Operation("device.inspect", "device.inspect", S.Obj({"kname": KNAME_SPEC}),
                   worker_handler="devices.inspect", profile=DEVICE_PROFILE),
         Operation("device.surface_test", "device.modify", S.Obj({"kname": KNAME_SPEC, "fingerprint": FINGERPRINT_SPEC}),
-                  inline=surface_runner, requires_active=True),
+                  inline=surface_runner, requires_active=True, pause_class="device_modify"),
     )

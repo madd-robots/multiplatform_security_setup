@@ -256,7 +256,8 @@ class LeaseFlowTests(unittest.TestCase):
     def test_gated_operations(self):
         gated = sorted(op.name for op in self.main.broker.operations.values() if op.requires_active)
         self.assertEqual(gated, ["device.surface_test", "transfer.write", "vault.intake"])
-        self.assertIsNone(self.main.broker.lease_gate)  # Main is the authority
+        self.assertNotIn(None, self.main.broker.gates)
+        self.assertFalse([g for g in self.main.broker.gates if hasattr(g, "require_active")])  # Main: no lease gate
         svc = self.spinoff()
         self.assertNotIn("lease.prepare", svc.broker.operations)  # a spinoff never issues
         self.assertNotIn("forge.prepare", svc.broker.operations)

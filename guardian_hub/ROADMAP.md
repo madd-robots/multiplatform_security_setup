@@ -426,8 +426,8 @@ exists, and the installer never reboots.
 2. D5 leases (Main issuance and registry generations, spinoff lease state,
    broker gate for ACTIVE operations, renewal, revocation, reissue): **done**
 3. watchdog adapter boundary (disabled by default, mock-tested, may only
-   pause). The uploaded watchdog v1 needs systemd, so under D9 it cannot be
-   integrated as is.
+   pause): **done**. The uploaded watchdog v1 needs systemd, so under D9 it
+   cannot be integrated as is.
 4. USB Airlock (D10)
 5. SysVinit preflight, installer v2, uninstall, post-install and post-reboot
    validation, offline bundle (D9, D11)
@@ -464,6 +464,21 @@ integrating it:
 - **Review first.** The watchdog's code is externally produced and must be
   reviewed against this security model before integration. Waiting on its
   interface: what it monitors, its alert format, and any autonomous actions.
+- **Guardian-side boundary: done (handoff H3, `usbguardian/watchdog`).**
+  `watchdog.report` (no owner factor) hands an opaque, frame-bounded
+  payload to the configured adapter, which may return only `Signal`
+  values (closed kinds and severities). Critical `space_pressure` or
+  `fill_suspected` pauses the classes intake, transfer_write (including
+  `forge.write`), release and device_modify; `watchdog.resume` needs a
+  touch. The default `DisabledAdapter` refuses every report. Tests use a
+  fixture adapter that is explicitly not the real format.
+- **When the watchdog's interface arrives**, check once: transport,
+  schema, authentication, integrity, privilege boundary, lifecycle, error
+  and timeout behaviour, event ids, process identity, freeze semantics,
+  evidence format, attacker-controlled fields, and whether it only
+  reports or also requests actions. Then map it onto signals and list the
+  concrete blockers. The uploaded v1 needs systemd and cannot run under D9
+  as it is.
 
 **D6. Custody integrity: Guardian attests custody, not provenance.**
 *(Settled 2026-10-05.)*

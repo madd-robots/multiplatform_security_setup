@@ -205,6 +205,25 @@ and deployments were not altered. Secrecy comes second.
   is detected while the audit ledger is intact; deleting both is not. A
   wrong system clock that runs *ahead* only shortens a lease.
 
+## Watchdog boundary (ROADMAP D8, handoff H3)
+
+- The external watchdog's interface does not exist yet, and Guardian does
+  not depend on it. The adapter is disabled by default and reports are
+  refused. A real adapter will be written only after its interface has
+  been reviewed.
+- The only thing an adapter can hand to Guardian is a signal: a kind and
+  a severity from fixed lists, plus escaped display text. Guardian's own
+  policy decides: a critical space signal pauses intake, transfer and
+  deployment writes, releases and destructive device work. Nothing else
+  can follow from a signal: no resume, no capability, no owner factor, no
+  lease or trust change, no file or device choice, no command.
+- The watchdog's account needs only `watchdog.report`. Resuming is an
+  owner touch (`watchdog.resume`). Pauses persist across restarts, hold in
+  memory even if the disk is too full to save them, and an unreadable
+  pause file pauses everything (fail closed).
+- A compromised reporter can pause work (denial of service); that is the
+  accepted cost of a restrict-only channel.
+
 ## Space exhaustion (ROADMAP D8)
 
 - Every Guardian write path checks free space and free inodes against a

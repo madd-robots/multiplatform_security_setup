@@ -35,6 +35,10 @@ Offline leases (D5). Records travel on any media; trust comes from the owner sig
                                        [--reason TEXT]
               guardian.py lease-check  --socket S --request REQUEST [--out RECORD]
 
+Watchdog pauses (D8; no watchdog adapter is enabled yet):
+    guardian.py watchdog-status --socket S
+    guardian.py watchdog-resume --socket S --auth KEY.pub HANDLE
+
 Install on Debian/MX (root, from the Rescue USB):
     guardian.py install-debian --package PKG --trust-log trust.log --trust-anchor trust.anchor
                                --owner-uid UID --worker-user usbguardian-worker
@@ -352,6 +356,22 @@ def cmd_lease_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_watchdog_status(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        _print(client.call("watchdog.status"))
+    return 0
+
+
+def cmd_watchdog_resume(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        status = client.call("watchdog.status")
+        print("Paused: %s (%s). Touch the YubiKey to resume." % (", ".join(status["paused"]) or "nothing",
+                                                                 display_text(status["reason"], 300)),
+              file=sys.stderr)
+        _print(call_as_owner(client, _signer(*args.auth), "watchdog.resume", {}))
+    return 0
+
+
 def cmd_install_debian(args: argparse.Namespace) -> int:
     from usbguardian.deploy.debian import install_debian
     from usbguardian.identity.handlers import WorkerSigCheck
@@ -473,6 +493,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     q = command("lease-check", cmd_lease_check, "Main: check a spinoff's request against the registry")
     q.add_argument("--request", required=True)
     q.add_argument("--out")
+    command("watchdog-status", cmd_watchdog_status, "show watchdog pauses and recent signals")
+    w = command("watchdog-resume", cmd_watchdog_resume, "lift watchdog pauses (owner touch)")
+    w.add_argument("--auth", nargs=2, required=True, metavar=("KEY_PUB", "HANDLE"))
     command("audit-status", cmd_audit_status, "show the audit ledger head")
     command("audit-verify", cmd_audit_verify, "verify the audit chain and signed checkpoints")
     a = command("audit-checkpoint", cmd_audit_checkpoint, "sign a checkpoint of the audit ledger head")

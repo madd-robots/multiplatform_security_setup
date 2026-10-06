@@ -169,19 +169,19 @@ class VaultService:
         transfer_id = S.Str(pattern=r"[0-9a-f]{32}", max_len=32)
         return (
             Operation("vault.intake", "vault.write", S.Obj({"names": names}), inline=self.intake,
-                      session_aware=True, fds=(1, MAX_FDS), requires_active=True),
+                      session_aware=True, fds=(1, MAX_FDS), requires_active=True, pause_class="intake"),
             Operation("transfer.prepare", "vault.prepare",
                       S.Obj({"record_ids": record_ids, "key_id": S.Str(pattern=KEY_ID_PATTERN, max_len=71)}),
                       inline=self.prepare, session_aware=True),
             Operation("transfer.write", "vault.write",
                       S.Obj({"transfer_id": transfer_id, "signature": S.Str(min_len=1, max_len=MAX_SIGNATURE)}),
                       inline=self.write, session_aware=True, owner_proof=self.write_proof, fds=(1, 1),
-                      requires_active=True),
+                      requires_active=True, pause_class="transfer_write"),
             Operation("transfer.verify", "vault.verify",
                       S.Obj({"offset": S.Int(min_value=0, max_value=2 ** 53 - 1)}),
                       inline=self.verify, session_aware=True, fds=(1, 1)),
             Operation("transfer.release", "vault.read", S.Obj({"name_policy": S.Enum(NAME_POLICIES)}),
-                      inline=self.release, session_aware=True, fds=(2, 2)),
+                      inline=self.release, session_aware=True, fds=(2, 2), pause_class="release"),
         )
 
 
