@@ -29,6 +29,11 @@ Install on Debian/MX (root, from the Rescue USB):
                                --owner-uid UID --worker-user usbguardian-worker
                                [--platform debian-mx|rescue-usb] [--enable-service] [--replace-policy] [--dry-run]
 
+Audit ledger:
+    guardian.py audit-status     --socket S
+    guardian.py audit-verify     --socket S
+    guardian.py audit-checkpoint --socket S --auth KEY.pub HANDLE
+
 Any operation:
     guardian.py call OP [--params JSON] [--auth KEY.pub HANDLE] --socket S
 """
@@ -57,7 +62,7 @@ from usbguardian.common.text import display_text  # noqa: E402
 from usbguardian.identity import enrollment  # noqa: E402
 from usbguardian.identity.owner import call_as_owner  # noqa: E402
 from usbguardian.identity.sshkeys import parse_public_key  # noqa: E402
-from usbguardian.identity.sshsig import NS_DEPLOY, NS_TRANSFER, SshKeygenSigner  # noqa: E402
+from usbguardian.identity.sshsig import NS_AUDIT, NS_DEPLOY, NS_TRANSFER, SshKeygenSigner  # noqa: E402
 from usbguardian.runtime.authz import Policy  # noqa: E402
 from usbguardian.runtime.client import BrokerClient  # noqa: E402
 from usbguardian.runtime.sandbox import make_non_dumpable  # noqa: E402
@@ -262,6 +267,31 @@ def cmd_install_debian(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_audit_status(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        _print(client.call("audit.status"))
+    return 0
+
+
+def cmd_audit_verify(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        _print(client.call("audit.verify"))
+    return 0
+
+
+def cmd_audit_checkpoint(args: argparse.Namespace) -> int:
+    signer = _signer(*args.auth)
+    with _client(args) as client:
+        status = client.call("audit.status")
+        if status["namespace"] != NS_AUDIT:
+            raise ValidationError("unexpected signing namespace")
+        print("Touch the YubiKey to sign audit checkpoint at entry %d." % status["head_seq"], file=sys.stderr)
+        signature = signer.sign_ns(NS_AUDIT, bytes.fromhex(status["checkpoint_digest"]))
+        _print(client.call("audit.checkpoint", {"seq": status["head_seq"], "hash": status["head"],
+                                                "key_id": signer.key_id, "signature": signature.decode("ascii")}))
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="guardian.py", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -322,6 +352,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     f.add_argument("--auth", nargs=2, required=True, metavar=("KEY_PUB", "HANDLE"))
     f.add_argument("--instance-id", required=True)
 
+    command("audit-status", cmd_audit_status, "show the audit ledger head")
+    command("audit-verify", cmd_audit_verify, "verify the audit chain and signed checkpoints")
+    a = command("audit-checkpoint", cmd_audit_checkpoint, "sign a checkpoint of the audit ledger head")
+    a.add_argument("--auth", nargs=2, required=True, metavar=("KEY_PUB", "HANDLE"))
     d = command("install-debian", cmd_install_debian, "install a verified deployment on Debian/MX", socket=False)
     d.add_argument("--package", required=True)
     d.add_argument("--trust-log", required=True)

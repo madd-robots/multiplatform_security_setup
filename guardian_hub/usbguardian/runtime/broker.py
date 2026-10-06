@@ -89,7 +89,8 @@ def default_operations() -> Iterable[Operation]:
 
 class Broker:
     def __init__(self, operations: Iterable[Operation], launcher: WorkerLauncher, *,
-                 max_concurrent_workers: int = 4, logger: Optional[logging.Logger] = None):
+                 max_concurrent_workers: int = 4, logger: Optional[logging.Logger] = None,
+                 audit: Optional[Any] = None):
         self.operations: Dict[str, Operation] = {}
         for op in operations:
             if op.name in self.operations:
@@ -98,6 +99,9 @@ class Broker:
         self.launcher = launcher
         self.logger = logger or get_logger("broker")
         self._worker_slots = threading.BoundedSemaphore(max_concurrent_workers)
+        # Audit ledger (audit/ledger.py). An allowed operation runs only after its
+        # authorization was recorded; if that record cannot be written, it is refused.
+        self.audit = audit
 
     def handle(self, principal: authz.Principal, message: Any, session: Optional[Session] = None) -> Dict[str, Any]:
         """Answer one request.  Never raises; every failure becomes an error response."""
@@ -122,6 +126,14 @@ class Broker:
                       principal=principal.name, uid=principal.uid, op=op_name, capability=op.capability,
                       allowed=decision.allowed, reason=decision.reason, request_id=request_id,
                       factor_source=factor_source)
+            if self.audit is not None:
+                try:
+                    self.audit.append("authz.decision", principal=principal.name, uid=principal.uid, op=op_name,
+                                      capability=op.capability, allowed=decision.allowed, reason=decision.reason,
+                                      factor_source=factor_source, request_id=request_id)
+                except Exception:
+                    if decision.allowed:
+                        raise GuardianError("audit ledger unavailable; operation refused", code="AUDIT_UNAVAILABLE")
             if not decision.allowed:
                 raise PermissionDenied("operation requires %s (%s)" % (op.capability, decision.reason))
             if not op.fds[0] <= nfds <= op.fds[1]:
@@ -140,6 +152,12 @@ class Broker:
             outcome = err.code
         log_event(self.logger, logging.INFO, "op.completed", principal=principal.name, op=op_name,
                   request_id=request_id, outcome=outcome, ms=int((time.monotonic() - started) * 1000))
+        if self.audit is not None and op_name != "invalid":
+            try:
+                self.audit.append("op.completed", principal=principal.name, op=op_name, request_id=request_id,
+                                  outcome=outcome)
+            except Exception:
+                log_event(self.logger, logging.ERROR, "audit.write_failed", op=op_name, request_id=request_id)
         return response
 
     def _authorize(self, principal: authz.Principal, op: Operation, request: Dict[str, Any],
