@@ -1,4 +1,4 @@
-# Security model (Stages 1 to 7)
+# Security model (Stages 1 to 7, audit ledger, offline leases)
 
 ## Threat model (owner decision D1, see ROADMAP.md)
 
@@ -148,7 +148,8 @@ and deployments were not altered. Secrecy comes second.
   snapshot alone. Diverging logs are refused as a fork.
 - Deployment and transfer signatures use separate namespaces and cannot
   be interchanged.
-- Not yet: revoking a deployed spinoff while it is offline (D5).
+- Authority to act comes from a separate, expiring lease (below), not from
+  the deployment.
 
 ## Installation (Stage 7, Debian/MX)
 
@@ -163,6 +164,46 @@ and deployments were not altered. Secrecy comes second.
 - USB interface blocking at the kernel level is supplied as a reviewed
   suggestion, not applied, because applying it blindly can lock out input
   devices.
+
+## Audit ledger (handoff H1)
+
+- Every authorization decision and every outcome is appended to a hash
+  chain before the operation runs. If the ledger cannot be written, an
+  allowed operation is refused. A broken chain stops the broker at start.
+- Edits, deletions, reordering and truncation inside the chain are
+  detected. Root can rewrite the chain from some point onward; an
+  owner-signed checkpoint (one touch) fixes the head, so a rewrite before
+  it is detectable, best checked on another instance from a copy.
+  Entries removed after the last checkpoint, at the end, are not
+  detectable without an external copy.
+- Secrets never enter it: fields are redacted like log fields; only
+  Guardian-generated signatures and digests are stored byte for byte.
+
+## Offline leases (ROADMAP D5)
+
+- A spinoff holds authority only under a lease signed by an owner key
+  through Guardian Main (one touch), bound to its instance id, a machine
+  binding, a generation and a key the spinoff generated itself. Without
+  an ACTIVE (or EXPIRING) lease it refuses intake, writing transfers and
+  destructive device work. Verification and release of existing data
+  never need a lease: authorization is separate from recovery.
+- A spinoff cannot extend, renew or un-revoke itself, lower its
+  generation or sequence, or issue anything: it has no issuing operation,
+  and its records need an owner signature it cannot make.
+- Sequences only increase. Stale, replayed, misbound or rolled-back
+  records are refused. Revocation, supersession and an observed expiry are
+  sticky; setting the clock back revives none of them.
+- A clock behind the highest time already observed (beyond 5 minutes)
+  makes the state UNKNOWN, which fails closed. A newer owner-signed lease
+  is the way out of a clock that once ran far ahead.
+- **Limits.** An offline spinoff loses authority only when a revocation is
+  imported, its lease expires, or it learns it is superseded; instant
+  remote revocation is impossible. The machine binding is a digest of DMI
+  and machine-id values, which root can fake and a disk clone carries; it
+  is not attestation. Without protected non-rollback storage (for example
+  a TPM), root can delete the lease state. Replacing it with an older copy
+  is detected while the audit ledger is intact; deleting both is not. A
+  wrong system clock that runs *ahead* only shortens a lease.
 
 ## Space exhaustion (ROADMAP D8)
 

@@ -5,7 +5,12 @@
     forge.write    (forge.build, 1 touch)     the owner's deploy-namespace signature is the proof;
                                               write to a passed fd, read back, record in registry
     forge.list     (forge.prepare)            registry entries
-    forge.retire   (forge.build, 1 touch)     mark a deployment retired at Main (D5 pending)
+    forge.retire   (forge.build, 1 touch)     mark a deployment retired at Main; no new leases
+                                              (lease/issuer.py) are issued for it afterwards
+
+``redeploy`` builds a new package (code update or reinstall) for an
+existing active instance. Authority is not part of the package; the
+instance's lease (D5) carries it.
 
 The code shipped is the broker's own code tree, which a root broker has
 already verified as root-owned and protected (runtime/workers.py).
@@ -63,8 +68,16 @@ class ForgeService:
         state = self.trust.require_state()
         if params["key_id"] not in state.active:
             raise ValidationError("key is not an active owner key")
-        if params["instance_id"] == self.instance_id or self.registry.is_known(params["instance_id"]):
+        redeploy = params.get("redeploy", False)
+        if params["instance_id"] == self.instance_id:
             raise ValidationError("instance id already used", code="INSTANCE_EXISTS")
+        if redeploy:
+            entry = self.registry.get(params["instance_id"])
+            if entry["status"] != "active" or entry["platform"] != params["platform"]:
+                raise ValidationError("only an active deployment can be redeployed, on the same platform")
+        elif self.registry.is_known(params["instance_id"]):
+            raise ValidationError("instance id already used (use redeploy for a code update)",
+                                  code="INSTANCE_EXISTS")
         code_records = []
         code = []
         for rel, path in collect_code(self.code_root):
@@ -80,7 +93,7 @@ class ForgeService:
                    self.store.intake_bytes(trust_log_bytes(self.trust.envelopes()), TRUST_LOG_NAME)] + code_records
         manifest = build_manifest(records, instance_id=self.instance_id, scheme=SCHEME, key_id=params["key_id"],
                                   transfer_id=descriptor["deployment_id"])
-        session.put_pending("forge:" + descriptor["deployment_id"], (manifest, descriptor))
+        session.put_pending("forge:" + descriptor["deployment_id"], (manifest, descriptor, redeploy))
         return {"deployment_id": descriptor["deployment_id"], "digest": manifest_digest(manifest).hex(),
                 "namespace": NS_DEPLOY, "instance_id": descriptor["instance_id"], "platform": descriptor["platform"],
                 "profile": descriptor["profile"], "capabilities": descriptor["capabilities"],
@@ -93,7 +106,7 @@ class ForgeService:
         return pending
 
     def write_proof(self, principal: authz.Principal, params: Dict[str, Any], session: Optional[Session]) -> bool:
-        manifest, _ = self._pending(params, session)
+        manifest, _, _ = self._pending(params, session)
         try:
             self._verifier().verify(SCHEME, manifest["sender"]["key_id"], manifest_digest(manifest),
                                     params["signature"].encode("ascii"))
@@ -103,7 +116,7 @@ class ForgeService:
 
     def write(self, principal: authz.Principal, params: Dict[str, Any], session: Optional[Session]) -> Any:
         assert session is not None
-        manifest, descriptor = self._pending(params, session)
+        manifest, descriptor, redeploy = self._pending(params, session)
         fds = session.take_fds()
         try:
             st = _check_fd(fds[0], "file", writable=True)
@@ -116,10 +129,14 @@ class ForgeService:
         finally:
             for fd in fds:
                 os.close(fd)
-        self.registry.add({"instance_id": descriptor["instance_id"], "deployment_id": descriptor["deployment_id"],
-                           "platform": descriptor["platform"], "profile": descriptor["profile"],
-                           "issued": descriptor["issued"], "package_sha256": written["package_sha256"],
-                           "status": "active", "retired": None})
+        deployment = {"instance_id": descriptor["instance_id"], "deployment_id": descriptor["deployment_id"],
+                      "platform": descriptor["platform"], "profile": descriptor["profile"],
+                      "issued": descriptor["issued"], "package_sha256": written["package_sha256"],
+                      "status": "active", "retired": None}
+        if redeploy:
+            self.registry.redeploy(descriptor["instance_id"], deployment)
+        else:
+            self.registry.add(deployment)
         session.drop_pending("forge:" + params["deployment_id"])
         return {"deployment_id": descriptor["deployment_id"], "instance_id": descriptor["instance_id"],
                 "package_sha256": written["package_sha256"], "package_length": written["package_length"],
@@ -137,7 +154,8 @@ class ForgeService:
         return (
             Operation("forge.prepare", "forge.prepare",
                       S.Obj({"instance_id": iid, "platform": S.Enum(PLATFORMS), "profile": S.Enum(PROFILES),
-                             "key_id": S.Str(pattern=KEY_ID_PATTERN, max_len=71)}),
+                             "key_id": S.Str(pattern=KEY_ID_PATTERN, max_len=71), "redeploy": S.Bool()},
+                            optional=("redeploy",)),
                       inline=self.prepare, session_aware=True),
             Operation("forge.write", "forge.build",
                       S.Obj({"deployment_id": did, "signature": S.Str(min_len=1, max_len=MAX_SIGNATURE)}),

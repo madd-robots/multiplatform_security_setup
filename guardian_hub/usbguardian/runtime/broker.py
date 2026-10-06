@@ -51,6 +51,7 @@ class Operation:
     session_aware: bool = False       # inline(principal, params, session)
     owner_proof: Optional[OwnerProof] = None
     fds: Tuple[int, int] = (0, 0)     # allowed number of passed file descriptors
+    requires_active: bool = False     # on a spinoff, runs only under an ACTIVE or EXPIRING lease (D5)
 
     def __post_init__(self) -> None:
         if not 0 <= self.fds[0] <= self.fds[1] <= ipc.MAX_FDS:
@@ -90,7 +91,7 @@ def default_operations() -> Iterable[Operation]:
 class Broker:
     def __init__(self, operations: Iterable[Operation], launcher: WorkerLauncher, *,
                  max_concurrent_workers: int = 4, logger: Optional[logging.Logger] = None,
-                 audit: Optional[Any] = None):
+                 audit: Optional[Any] = None, lease_gate: Optional[Any] = None):
         self.operations: Dict[str, Operation] = {}
         for op in operations:
             if op.name in self.operations:
@@ -102,6 +103,9 @@ class Broker:
         # Audit ledger (audit/ledger.py). An allowed operation runs only after its
         # authorization was recorded; if that record cannot be written, it is refused.
         self.audit = audit
+        # Spinoffs only (lease/spinoff.py): require_active(op_name) raises unless the lease is ACTIVE.
+        # Guardian Main has no gate; it is the issuing authority.
+        self.lease_gate = lease_gate
 
     def handle(self, principal: authz.Principal, message: Any, session: Optional[Session] = None) -> Dict[str, Any]:
         """Answer one request.  Never raises; every failure becomes an error response."""
@@ -139,6 +143,8 @@ class Broker:
             if not op.fds[0] <= nfds <= op.fds[1]:
                 raise ValidationError("operation %s takes %d..%d file descriptors" % (op_name, op.fds[0], op.fds[1]))
             params = S.validate(op.params, request["params"], "$.params")
+            if op.requires_active and self.lease_gate is not None:
+                self.lease_gate.require_active(op_name)
             result = self._execute(op, principal, params, session)
             response = ipc.ok_response(request_id, result)
             ipc.encode_frame(response)  # result must be canonical and fit in a frame

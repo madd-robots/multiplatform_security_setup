@@ -34,7 +34,8 @@ DESCRIPTOR_SPEC = S.Obj({
     "profile": S.Enum(PROFILES),
     "capabilities": S.List(S.Enum(CAPABILITIES), max_items=len(CAPABILITIES), unique=True),
     "issued": S.Str(pattern=TIMESTAMP_PATTERN, max_len=20),
-    "expires": S.Nullable(S.Str(pattern=TIMESTAMP_PATTERN, max_len=20)),  # ROADMAP D5 pending
+    # Latest install time for the package itself. Authority comes from the lease (D5, lease/).
+    "expires": S.Nullable(S.Str(pattern=TIMESTAMP_PATTERN, max_len=20)),
     "app_version": S.Str(pattern=r"[0-9]{1,4}(\.[0-9]{1,4}){1,3}", max_len=32),
     "trust": S.Obj({"anchor": S.Str(pattern=r"[0-9a-f]{64}", max_len=64),
                     "head": S.Str(pattern=r"[0-9a-f]{64}", max_len=64),

@@ -4,7 +4,7 @@
 
 Broker (root, from the Rescue USB or installed system):
     guardian.py broker --policy FILE --socket PATH --state-dir DIR [--worker-user NAME]
-                       [--instance-id ID] [--log-file FILE]
+                       [--instance-id ID] [--log-file FILE] [--lease-days N]
 
 Owner keys (each signature needs a touch on the YubiKey; no PIN, no password):
     guardian.py key-info KEY.pub
@@ -21,8 +21,19 @@ Custody and transfers:
 
 Guardian Forge (Guardian Main):
     guardian.py forge-build  --socket S --auth KEY.pub HANDLE --instance-id ID --platform P --profile R --out PKG
+                             [--redeploy]
     guardian.py forge-list   --socket S
     guardian.py forge-retire --socket S --auth KEY.pub HANDLE --instance-id ID
+
+Offline leases (D5). Records travel on any media; trust comes from the owner signature:
+    spinoff:  guardian.py lease-request --socket S --out REQUEST [--rekey]
+              guardian.py lease-import  --socket S RECORD
+              guardian.py lease-status  --socket S
+    Main:     guardian.py lease-issue  --socket S --auth KEY.pub HANDLE --request REQUEST --out RECORD
+                                       [--days N] [--warn-days N] [--reissue]
+              guardian.py lease-revoke --socket S --auth KEY.pub HANDLE --instance-id ID --out RECORD
+                                       [--reason TEXT]
+              guardian.py lease-check  --socket S --request REQUEST [--out RECORD]
 
 Install on Debian/MX (root, from the Rescue USB):
     guardian.py install-debian --package PKG --trust-log trust.log --trust-anchor trust.anchor
@@ -54,7 +65,7 @@ from typing import Any, List, Optional
 sys.path.append(str(Path(__file__).resolve().parent))
 
 from usbguardian.app import build_services  # noqa: E402
-from usbguardian.common.canonical import canonical_loads  # noqa: E402
+from usbguardian.common.canonical import canonical_dumps, canonical_loads  # noqa: E402
 from usbguardian.common.errors import GuardianError, ValidationError  # noqa: E402
 from usbguardian.common.fsutil import read_file_bounded  # noqa: E402
 from usbguardian.common.log import configure_logging  # noqa: E402
@@ -62,7 +73,7 @@ from usbguardian.common.text import display_text  # noqa: E402
 from usbguardian.identity import enrollment  # noqa: E402
 from usbguardian.identity.owner import call_as_owner  # noqa: E402
 from usbguardian.identity.sshkeys import parse_public_key  # noqa: E402
-from usbguardian.identity.sshsig import NS_AUDIT, NS_DEPLOY, NS_TRANSFER, SshKeygenSigner  # noqa: E402
+from usbguardian.identity.sshsig import NS_AUDIT, NS_DEPLOY, NS_LEASE, NS_TRANSFER, SshKeygenSigner  # noqa: E402
 from usbguardian.runtime.authz import Policy  # noqa: E402
 from usbguardian.runtime.client import BrokerClient  # noqa: E402
 from usbguardian.runtime.sandbox import make_non_dumpable  # noqa: E402
@@ -108,7 +119,9 @@ def cmd_broker(args: argparse.Namespace) -> int:
         print("WARNING: development mode. Workers run as your own user; the sandbox limits them but does not "
               "separate them from your files. Run the broker as root with --worker-user for real use.",
               file=sys.stderr)
-    services = build_services(launcher, Path(args.state_dir), instance_id=args.instance_id)
+    services = build_services(launcher, Path(args.state_dir), instance_id=args.instance_id,
+                              lease_days=args.lease_days)
+    print("Guardian broker: role %s, instance %s." % (services.role, args.instance_id), file=sys.stderr)
     server = BrokerServer(services.broker, policy, Path(args.socket), socket_mode=int(args.socket_mode, 8))
     signal.signal(signal.SIGTERM, lambda *_: server.stop())
     signal.signal(signal.SIGINT, lambda *_: server.stop())
@@ -227,7 +240,8 @@ def cmd_forge_build(args: argparse.Namespace) -> int:
     try:
         with _client(args) as client:
             prepared = client.call("forge.prepare", {"instance_id": args.instance_id, "platform": args.platform,
-                                                     "profile": args.profile, "key_id": signer.key_id})
+                                                     "profile": args.profile, "key_id": signer.key_id,
+                                                     "redeploy": args.redeploy})
             if prepared["namespace"] != NS_DEPLOY:
                 raise ValidationError("unexpected signing namespace")
             print("Deployment %s for %s (%s, profile %s, capabilities: %s)." % (
@@ -251,6 +265,90 @@ def cmd_forge_list(args: argparse.Namespace) -> int:
 def cmd_forge_retire(args: argparse.Namespace) -> int:
     with _client(args) as client:
         _print(call_as_owner(client, _signer(*args.auth), "forge.retire", {"instance_id": args.instance_id}))
+    return 0
+
+
+def _read_doc(path: str) -> Any:
+    """A request or record from removable media: bounded, strict canonical JSON, untrusted until verified."""
+    return canonical_loads(read_file_bounded(Path(path), 64 * 1024).rstrip(b"\n"), require_canonical=True,
+                           max_bytes=64 * 1024)
+
+
+def _write_doc(path: str, doc: Any) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
+    try:
+        os.write(fd, canonical_dumps(doc) + b"\n")
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def cmd_lease_status(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        _print(client.call("lease.status"))
+    return 0
+
+
+def cmd_lease_request(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        result = client.call("lease.request", {"rekey": args.rekey})
+    _write_doc(args.out, result["envelope"])
+    print("Lease request written. Compare on Guardian Main before touching the YubiKey:\n"
+          "  spinoff key %s\n  machine binding %s" % (result["key_fingerprint"], result["machine_id"]),
+          file=sys.stderr)
+    return 0
+
+
+def cmd_lease_import(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        _print(client.call("lease.import", {"envelope": _read_doc(args.record)}))
+    return 0
+
+
+def _sign_lease(client: BrokerClient, signer: SshKeygenSigner, params: Any, out: str) -> None:
+    prepared = client.call("lease.prepare", dict(params, key_id=signer.key_id))
+    if prepared["namespace"] != NS_LEASE:
+        raise ValidationError("unexpected signing namespace")
+    summary = {k: v for k, v in prepared.items() if k not in ("digest", "namespace")}
+    print(json.dumps(summary, indent=2, sort_keys=True, ensure_ascii=True), file=sys.stderr)
+    print("Check the key fingerprint and machine binding against the spinoff's screen, then touch the YubiKey.",
+          file=sys.stderr)
+    signature = signer.sign_ns(NS_LEASE, bytes.fromhex(prepared["digest"]))
+    result = client.call("lease.commit", {"record_id": prepared["record_id"], "signature": signature.decode("ascii")})
+    _write_doc(out, result["envelope"])
+    _print({k: v for k, v in result.items() if k != "envelope"})
+
+
+def cmd_lease_issue(args: argparse.Namespace) -> int:
+    signer = _signer(*args.auth)
+    request = _read_doc(args.request)
+    instance = request.get("request", {}).get("instance_id") if isinstance(request, dict) else None
+    if not isinstance(instance, str):
+        raise ValidationError("not a lease request")
+    params: Any = {"action": "issue", "instance_id": instance, "request": request, "reissue": args.reissue}
+    if args.days is not None:
+        params["days"] = args.days
+    if args.warn_days is not None:
+        params["warn_days"] = args.warn_days
+    with _client(args) as client:
+        _sign_lease(client, signer, params, args.out)
+    return 0
+
+
+def cmd_lease_revoke(args: argparse.Namespace) -> int:
+    signer = _signer(*args.auth)
+    with _client(args) as client:
+        _sign_lease(client, signer, {"action": "revoke", "instance_id": args.instance_id, "reason": args.reason},
+                    args.out)
+    return 0
+
+
+def cmd_lease_check(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        result = client.call("lease.check", {"request": _read_doc(args.request)})
+    if args.out and result["latest"] is not None:
+        _write_doc(args.out, result["latest"])
+    _print({k: v for k, v in result.items() if k != "latest"})
     return 0
 
 
@@ -310,6 +408,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     b.add_argument("--socket-mode", default="600")
     b.add_argument("--worker-user")
     b.add_argument("--log-file")
+    b.add_argument("--lease-days", type=int, default=90, help="Main: default lease length in days (policy)")
     c = command("call", cmd_call, "call a broker operation")
     c.add_argument("op")
     c.add_argument("--params")
@@ -347,11 +446,33 @@ def main(argv: Optional[List[str]] = None) -> int:
     f.add_argument("--platform", required=True)
     f.add_argument("--profile", required=True)
     f.add_argument("--out", required=True)
+    f.add_argument("--redeploy", action="store_true", help="new package for an existing instance (code update)")
     command("forge-list", cmd_forge_list, "list deployments built by this Guardian Main")
     f = command("forge-retire", cmd_forge_retire, "retire a deployment at Guardian Main")
     f.add_argument("--auth", nargs=2, required=True, metavar=("KEY_PUB", "HANDLE"))
     f.add_argument("--instance-id", required=True)
 
+    command("lease-status", cmd_lease_status, "spinoff: show the lease state")
+    q = command("lease-request", cmd_lease_request, "spinoff: write a signed lease request")
+    q.add_argument("--out", required=True)
+    q.add_argument("--rekey", action="store_true", help="fresh key for a reissue (generation N+1)")
+    q = command("lease-import", cmd_lease_import, "spinoff: import a signed lease or revocation")
+    q.add_argument("record")
+    q = command("lease-issue", cmd_lease_issue, "Main: issue or renew a lease from a request")
+    q.add_argument("--auth", nargs=2, required=True, metavar=("KEY_PUB", "HANDLE"))
+    q.add_argument("--request", required=True)
+    q.add_argument("--out", required=True)
+    q.add_argument("--days", type=int)
+    q.add_argument("--warn-days", type=int)
+    q.add_argument("--reissue", action="store_true", help="confirm a new key (generation N+1)")
+    q = command("lease-revoke", cmd_lease_revoke, "Main: revoke a spinoff's current generation")
+    q.add_argument("--auth", nargs=2, required=True, metavar=("KEY_PUB", "HANDLE"))
+    q.add_argument("--instance-id", required=True)
+    q.add_argument("--out", required=True)
+    q.add_argument("--reason", default="")
+    q = command("lease-check", cmd_lease_check, "Main: check a spinoff's request against the registry")
+    q.add_argument("--request", required=True)
+    q.add_argument("--out")
     command("audit-status", cmd_audit_status, "show the audit ledger head")
     command("audit-verify", cmd_audit_verify, "verify the audit chain and signed checkpoints")
     a = command("audit-checkpoint", cmd_audit_checkpoint, "sign a checkpoint of the audit ledger head")

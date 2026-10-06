@@ -52,6 +52,14 @@ guardian_hub/
       registry.py             Guardian Main's deployment registry (active / retired)
       service.py              forge.prepare / forge.write / forge.list / forge.retire
       install.py              target side: verify against a pinned anchor + trust log, extract code
+    lease/                    D5 offline authorization leases
+      records.py              lease request, lease and revocation documents
+      machine.py              machine binding digest (DMI, machine-id); not attestation
+      spinoff.py              spinoff lease state, its own key, the ACTIVE gate, clock high-water mark
+      issuer.py               Guardian Main: issue, renew, reissue, revoke; generations in the registry
+    audit/                    tamper-evident audit ledger (handoff H1)
+      ledger.py               hash-chained JSON-line segments, owner-signed checkpoints
+      operations.py           audit.status / entries / verify / checkpoint
     deploy/debian.py          Stage 7: install a verified deployment on Debian/MX (SysVinit)
     app.py                    assembles the broker from its services
     runtime/                  Stage 2 security runtime (Linux)
@@ -113,6 +121,39 @@ python3 -I -B guardian.py install-debian ... --enable-service
 Before running the install, compare the anchor printed by the dry run
 with Guardian Main's (`trust-status`).
 
+## Spinoff leases (D5)
+
+An installed spinoff starts **UNLEASED**: it can verify and release
+existing transfers, but intake, writing transfers and destructive device
+work need an ACTIVE lease. Records travel on any media; only the owner
+signature (one touch on Guardian Main) gives them weight.
+
+```
+# spinoff: make a request (generates the spinoff key on first use)
+python3 -I -B guardian.py lease-request --socket S --out /media/usb/desk-request.json
+# Guardian Main: check the printed key fingerprint and machine binding against
+# the spinoff's screen, then touch the YubiKey (90 days unless --days says otherwise)
+python3 -I -B guardian.py lease-issue --socket S --auth guardian-key-a.pub guardian-key-a \
+    --request /media/usb/desk-request.json --out /media/usb/desk-lease.json
+# spinoff
+python3 -I -B guardian.py lease-import --socket S /media/usb/desk-lease.json
+python3 -I -B guardian.py lease-status --socket S
+```
+
+- **Renewal:** the same three steps before expiry (state EXPIRING during the
+  last 14 days by default).
+- **Revocation:** `lease-revoke --instance-id desk --out FILE` on Main,
+  then `lease-import FILE` on the spinoff. It takes effect at Main at once,
+  but on an offline spinoff only when the record is imported or the lease
+  expires. Nothing is erased.
+- **Reissue** (lost or compromised spinoff key, reinstall): `lease-request
+  --rekey` (or a fresh install) and `lease-issue --reissue`. The new
+  generation has a fresh key; the old one becomes SUPERSEDED and Main
+  refuses it from then on.
+- **Reconnect:** `lease-check --request FILE --out RECORD` on Main tells
+  whether a spinoff's generation is current, superseded or revoked, and
+  writes the latest signed record for it to import.
+
 ## Running the broker
 
 The real configuration is a root broker whose workers run as a dedicated
@@ -149,14 +190,18 @@ sudo python3 -I -B guardian.py call device.inspect --params '{"kname":"sdb"}' --
 
 `device.list` and `device.inspect` need the `device.inspect` capability.
 `device.surface_test` overwrites the whole device. It needs `device.modify`
-plus the YubiKey `owner_key` factor, so it is refused until Stage 5.
+plus the YubiKey `owner_key` factor (one touch), and on a spinoff an
+ACTIVE lease.
 
 Running the broker as a normal user is **development mode**. Workers then
 share your uid. They still get the resource limits and process flags, but
 they are not separated from your files. The broker prints a warning when it
 starts this way.
 
-A SysVinit service and packaging are Stage 7 work.
+The broker's role follows from its state directory: with the installer's
+`deployment.json` it runs as a spinoff (lease gate on, no Forge or lease
+issuing), without it as Guardian Main. On an installed system the SysVinit
+script from `install-debian` starts it.
 
 ## Tests
 

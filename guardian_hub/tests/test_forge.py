@@ -41,7 +41,7 @@ class ProfileTests(unittest.TestCase):
             self.assertIn("auth.assert", caps, name)
         self.assertEqual(PR.profile_capabilities("diagnostic"),
                          sorted({"runtime.status", "auth.assert", "trust.read", "runtime.diagnostics",
-                                 "device.inspect", "vault.verify"}))
+                                 "device.inspect", "vault.verify", "lease.read", "lease.manage"}))
 
     def test_unavailable_platforms_refused(self):
         PR.check_platform("debian-mx")
@@ -219,6 +219,21 @@ class ForgeTests(unittest.TestCase):
             self.client.call("forge.prepare", {"instance_id": "laptop", "platform": "debian-mx",
                                                "profile": "storage", "key_id": self.A.key_id})
         self.assertEqual(cm.exception.code, "INSTANCE_EXISTS")
+        first = self.client.call("forge.list")["deployments"][0]["deployment_id"]
+        prepared = self.client.call("forge.prepare", {"instance_id": "laptop", "platform": "debian-mx",
+                                                      "profile": "storage", "key_id": self.A.key_id,
+                                                      "redeploy": True})
+        fd = os.open(self.root / "update.gpkg", os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            self.client.call("forge.write", {"deployment_id": prepared["deployment_id"], "signature":
+                             self.A.sign_ns(NS_DEPLOY, bytes.fromhex(prepared["digest"])).decode()}, [fd])
+        finally:
+            os.close(fd)
+        entry = self.client.call("forge.list")["deployments"][0]
+        self.assertEqual((entry["deployment_id"], entry["previous"]), (prepared["deployment_id"], [first]))
+        with self.assertRaises(E.GuardianError):  # redeploy keeps the platform
+            self.client.call("forge.prepare", {"instance_id": "laptop", "platform": "rescue-usb",
+                                               "profile": "storage", "key_id": self.A.key_id, "redeploy": True})
         with self.assertRaises(E.GuardianError):
             self.client.call("forge.prepare", {"instance_id": "guardian-main", "platform": "debian-mx",
                                                "profile": "storage", "key_id": self.A.key_id})

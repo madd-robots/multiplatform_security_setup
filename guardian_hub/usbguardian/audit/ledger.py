@@ -190,6 +190,19 @@ class AuditLedger:
         with self._lock:
             return verify_lines(self._read_segments(), checkpoint_verifier=checkpoint_verifier)
 
+    def find_fields(self, event: str) -> List[Dict[str, Any]]:
+        """The fields of every entry with this event name, oldest first (verifies the chain while reading)."""
+        with self._lock:
+            segments = self._read_segments()
+        verify_lines(segments)
+        out = []
+        for _, data in segments:
+            for line in data.split(b"\n")[:-1] if data else []:
+                entry = canonical_loads(line, require_canonical=True, max_bytes=MAX_ENTRY_BYTES)["entry"]
+                if entry["event"] == event:
+                    out.append(entry["fields"])
+        return out
+
     def entries(self, since: int, limit: int) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
         with self._lock:

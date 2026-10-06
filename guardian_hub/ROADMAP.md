@@ -14,7 +14,7 @@ records where the implementation deviates from it and why.
 | 5 YubiKey integration | enrollment, authentication, owner verification; manifest signer/verifier, revocation (D3); key rotation and locking; broker vault/transfer operations with fd passing | **Done** (`usbguardian/identity`, `vault/operations.py`); hardware validation pending, see notes |
 | 6 Guardian Forge | spinoff creation, deployment packages, signing, registry | **Done** (`usbguardian/forge`); see notes below |
 | 7 Platforms | Debian/MX first, then Termux, then Windows | **Debian/MX done** (`usbguardian/deploy`); Termux and Windows not started, see notes |
-| 8 Device assurance | firmware and artifact verification, erase verification, reports | Not started |
+| 8 Device assurance | firmware and artifact verification, erase verification, reports | Audit ledger done (`usbguardian/audit`, handoff H1); reports not started |
 | 9 Final UI | dashboard, managers, forge, audit viewer | Not started |
 
 ### Stage 2 hardening still open
@@ -177,10 +177,10 @@ before anything can rely on it, and none was claimed as done.
   - the generated init script's syntax (`sh -n`)
 - **Not yet validated on MX:** starting, stopping and enabling the
   SysVinit service, and `update-rc.d`.
-- **Upgrades:** Forge refuses to reuse an instance id, so reissuing a
-  deployment for the same machine needs a Forge "reissue" operation. That
-  is planned with D5, because expiry and reissue belong together. The
-  installer already supports switching releases.
+- **Upgrades:** `forge-build --redeploy` builds a new package for an
+  existing active instance (the registry keeps earlier deployment ids),
+  and the installer switches releases. A reissue of authority (new key,
+  generation N+1) is a lease operation, not a package (D5).
 - **Termux: not started.** Without root there is no privilege separation
   (development mode only) and no raw device access; USB goes through the
   Android USB host API (`termux-usb`). The fitting first role is a
@@ -224,9 +224,11 @@ reports built on the Stage 3 surface test.
   - the descriptor's head and inventory must match what was signed
   - platform and expiry are checked
   - a revoked issuer key is rejected
-- **Registry** on Guardian Main: unique instance ids, active or retired.
-  Retirement is recorded at Main only. Telling offline spinoffs about it
-  needs D5, and the `expires` field stays `null` until D5 is decided.
+- **Registry** on Guardian Main: unique instance ids, active or retired,
+  plus the lease state of each instance (D5). A retired instance gets no
+  new lease; telling an offline spinoff needs a revocation record. The
+  descriptor's `expires` field is only a latest install time for the
+  package; authority comes from the lease.
 
 ## Owner decisions (2026-10-05)
 
@@ -354,6 +356,28 @@ write-protect switch for read-only roles such as the Rescue USB.
 - **States:** ACTIVE, EXPIRING (inside a warning window), EXPIRED, REVOKED,
   SUPERSEDED, plus UNKNOWN when the clock cannot be trusted.
 
+*Implemented (handoff H2, `usbguardian/lease`):*
+- Flow: the spinoff writes a request signed by its own ssh-ed25519 key
+  (`guardian-spinoff@v1`, proof of possession); Main checks it against the
+  registry and the owner signs the lease (`guardian-lease@v1`, one touch);
+  the spinoff imports it. Renewal repeats this with the same key.
+  Revocation is a signed record for the current generation. Reissue needs
+  a fresh key and the owner's explicit `--reissue`; the old generation
+  becomes SUPERSEDED at Main and its key is refused for good.
+- Machine binding: a digest of DMI product UUID and serials and
+  `/etc/machine-id` (placeholder values ignored). A changed binding needs
+  a reissue.
+- Gate: operations flagged `requires_active` (vault.intake,
+  transfer.write, device.surface_test) are refused unless the lease is
+  ACTIVE or EXPIRING. The broker's role follows from the state directory;
+  deleting the deployment descriptor does not turn a spinoff into Main.
+- Rollback: the accepted sequence is also written to the audit ledger, and
+  a lease state older than the ledger is UNKNOWN until the newest record
+  is imported again.
+- Not done: TPM-backed monotonic storage (evaluated as optional, not
+  required by D5); a periodic Main to spinoff sync channel (reconnect is a
+  manual `lease-check`); hardware validation on MX.
+
 **D7 (settled 2026-10-06, owner handoff). Encryption dependency.** No new
 general-purpose encryption framework. Approved for evaluation: `age` (already
 used by `mx_usb_airlock`) with `age-plugin-yubikey` and the PC/SC stack it
@@ -398,9 +422,9 @@ file mismatch, blocks installation. A post-reboot validation command
 exists, and the installer never reboots.
 
 **Handoff integration plan (2026-10-06), in order:**
-1. tamper-evident audit ledger (hash chain, owner-signed checkpoints)
+1. tamper-evident audit ledger (hash chain, owner-signed checkpoints): **done**
 2. D5 leases (Main issuance and registry generations, spinoff lease state,
-   broker gate for ACTIVE operations, renewal, revocation, reissue)
+   broker gate for ACTIVE operations, renewal, revocation, reissue): **done**
 3. watchdog adapter boundary (disabled by default, mock-tested, may only
    pause). The uploaded watchdog v1 needs systemd, so under D9 it cannot be
    integrated as is.
@@ -519,7 +543,8 @@ be met for the security claims to hold.
    data under them has been re-encrypted. Revocation of a spinoff must
    include such a re-key, or the spinoff can still read what it already had.
 
-5. **Offline spinoffs cannot be revoked instantly.** *(Pending, D5.)* A spinoff that never
+5. **Offline spinoffs cannot be revoked instantly.** *(Addressed by D5 leases, H2: revocation
+   takes effect no later than lease expiry.)* A spinoff that never
    syncs never learns that it was revoked. The fix is short-lived deployment
    certificates with an expiry and a minimum required epoch. Revocation then
    takes effect no later than the expiry. Spinoff certificates must never
