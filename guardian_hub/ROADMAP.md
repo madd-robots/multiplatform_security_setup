@@ -320,14 +320,98 @@ on a Guardian instance, but cannot prove the firmware is clean. To close the
 gap, use drives with signed, non-updatable firmware or a hardware
 write-protect switch for read-only roles such as the Rescue USB.
 
-**D5 (pending).** Offline revocation and certificate expiry for spinoffs
-(design review item 5) is waiting on the owner.
+**D5 (settled 2026-10-06, owner handoff). Renewable offline authorization leases.**
+- **Identity and lease:** each spinoff has a unique id, a machine binding, a
+  generation, a fresh keypair generated on the target (the private key
+  never leaves it), and an authorization sequence. Its lease has
+  not-before and not-after times and an owner signature made through
+  Guardian Main.
+- **Lease length:** 90 days by default, configurable per lease by Guardian
+  Main. This is Guardian policy, not a standard. A spinoff can never
+  extend, renew, un-revoke, re-generate or roll back its own state.
+- **Renewal and revocation:** both are signed records, carried on untrusted
+  media. They are bound to the spinoff, machine and generation, and their
+  sequences only increase, so stale, rolled-back or misbound records are
+  refused. Revocation removes authority only; it never erases data, media
+  or keys.
+- **Reissue** creates generation N+1 with fresh keys, and generation N
+  becomes SUPERSEDED.
+- **Limit:** a fully disconnected spinoff loses authority only when one of
+  these happens first: a revocation is imported, its lease expires, or it
+  syncs and learns it is obsolete. Instant remote revocation is impossible
+  and is not claimed.
+- **Rollback and clock:** monotonic signed state is kept locally, along with
+  a high-water mark of observed time. A clock that goes backwards makes
+  the authority state UNKNOWN, which fails closed for operations that need
+  ACTIVE authority. A clock rollback never revives an expired, revoked or
+  superseded state. Without protected non-rollback storage (for example a
+  TPM), deleting the local state is not detectable; that is documented, not
+  hidden.
+- **Authorization is separate from recovery:** expiry or revocation stops
+  operations that need ACTIVE authority (intake, writing transfers,
+  destructive device work), but never verification or release of existing
+  data.
+- **States:** ACTIVE, EXPIRING (inside a warning window), EXPIRED, REVOKED,
+  SUPERSEDED, plus UNKNOWN when the clock cannot be trusted.
 
-**D7 (pending). Optional encryption dependency.** Confidentiality needs an
-AEAD cipher and a PIN-free YubiKey-backed key. Neither is in the standard
-library or packaged in Debian/MX in a form that meets D2. Options: `age`
-with a FIDO2/PIV plugin, or python3-cryptography plus `fido2-tools`
-(hmac-secret). Waiting on the owner.
+**D7 (settled 2026-10-06, owner handoff). Encryption dependency.** No new
+general-purpose encryption framework. Approved for evaluation: `age` (already
+used by `mx_usb_airlock`) with `age-plugin-yubikey` and the PC/SC stack it
+needs (pcscd). The plugin uses PIV with PIN policy never and touch policy
+always, if both physical keys, their firmware and the plugin support that.
+Each YubiKey keeps its own hardware-generated key, and none is exported or
+copied. Hardware gate: inspect both keys first, then test on the MX
+machine. Until that gate passes, hardware-backed encryption is
+**deferred**, not claimed.
+
+**D9 (settled 2026-10-06). SysVinit only on MX.** No systemd units,
+`systemctl`, journald dependency or init switching. If PID 1 is systemd,
+service installation stops with `ENVIRONMENT MISMATCH - SYSVINIT NOT
+ACTIVE`. A read-only SysVinit preflight runs before any change:
+- PID 1 and its executable, package ownership, version, runlevel
+- rc directories and `update-rc.d`/`invoke-rc.d`
+- `dpkg --audit` and targeted `dpkg --verify` on the init packages
+
+Results are PASS, PASS WITH FINDINGS, BLOCKED or UNKNOWN. UNKNOWN never
+counts as PASS. dpkg checks are integrity signals, not proof of a clean
+system.
+
+**D10 (settled 2026-10-06). USB Airlock inside Guardian.** The flow is RED
+USB → read-only acquisition → quarantine → inspection (type, static script
+review, archive limits, malware scanner as one signal) → explicit approval →
+GREEN USB with destination verification. RED is never copied straight to
+GREEN, incoming content is never executed, and only approved files reach
+GREEN (no images, boot sectors or partition tables). The logic is reused
+from `mx_usb_airlock` where it fits.
+
+**D11 (settled 2026-10-06). Installer v2 and offline bundle.** An unprivileged
+preflight and plan comes first, then narrow privileged steps. The installer:
+- is idempotent (VERIFY, REPAIR or UPDATE an existing install)
+- never runs broad upgrades, never removes packages, never touches the
+  bootloader or init system
+- installs only missing required packages, with authenticated APT
+- uninstalls without touching user data, recovery material or keys
+
+The offline bundle is target-specific (MX release, architecture) and its
+manifest is owner-signed. A bundle that doesn't match the target, or any
+file mismatch, blocks installation. A post-reboot validation command
+exists, and the installer never reboots.
+
+**Handoff integration plan (2026-10-06), in order:**
+1. tamper-evident audit ledger (hash chain, owner-signed checkpoints)
+2. D5 leases (Main issuance and registry generations, spinoff lease state,
+   broker gate for ACTIVE operations, renewal, revocation, reissue)
+3. watchdog adapter boundary (disabled by default, mock-tested, may only
+   pause). The uploaded watchdog v1 needs systemd, so under D9 it cannot be
+   integrated as is.
+4. USB Airlock (D10)
+5. SysVinit preflight, installer v2, uninstall, post-install and post-reboot
+   validation, offline bundle (D9, D11)
+6. `age` capsules behind the D7 hardware gate
+7. documentation
+
+Hardware gates (MX HP, two YubiKeys) cannot run in this development
+environment and stay open until run on the real hardware.
 
 **D8 (recorded 2026-10-06). Space-exhaustion watchdog integration.**
 The owner is having an external watchdog designed elsewhere. It detects
