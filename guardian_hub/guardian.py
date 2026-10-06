@@ -19,6 +19,11 @@ Custody and transfers:
     guardian.py transfer-verify  --socket S PACKAGE
     guardian.py transfer-release --socket S --auth KEY.pub HANDLE [--generate-names] PACKAGE DEST_DIR
 
+Guardian Forge (Guardian Main):
+    guardian.py forge-build  --socket S --auth KEY.pub HANDLE --instance-id ID --platform P --profile R --out PKG
+    guardian.py forge-list   --socket S
+    guardian.py forge-retire --socket S --auth KEY.pub HANDLE --instance-id ID
+
 Any operation:
     guardian.py call OP [--params JSON] [--auth KEY.pub HANDLE] --socket S
 """
@@ -47,7 +52,7 @@ from usbguardian.common.text import display_text  # noqa: E402
 from usbguardian.identity import enrollment  # noqa: E402
 from usbguardian.identity.owner import call_as_owner  # noqa: E402
 from usbguardian.identity.sshkeys import parse_public_key  # noqa: E402
-from usbguardian.identity.sshsig import NS_TRANSFER, SshKeygenSigner  # noqa: E402
+from usbguardian.identity.sshsig import NS_DEPLOY, NS_TRANSFER, SshKeygenSigner  # noqa: E402
 from usbguardian.runtime.authz import Policy  # noqa: E402
 from usbguardian.runtime.client import BrokerClient  # noqa: E402
 from usbguardian.runtime.sandbox import make_non_dumpable  # noqa: E402
@@ -206,6 +211,39 @@ def cmd_transfer_release(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_forge_build(args: argparse.Namespace) -> int:
+    signer = _signer(*args.auth)
+    out = os.open(args.out, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        with _client(args) as client:
+            prepared = client.call("forge.prepare", {"instance_id": args.instance_id, "platform": args.platform,
+                                                     "profile": args.profile, "key_id": signer.key_id})
+            if prepared["namespace"] != NS_DEPLOY:
+                raise ValidationError("unexpected signing namespace")
+            print("Deployment %s for %s (%s, profile %s, capabilities: %s)." % (
+                prepared["deployment_id"], prepared["instance_id"], prepared["platform"], prepared["profile"],
+                ", ".join(prepared["capabilities"])), file=sys.stderr)
+            print("Touch the YubiKey to sign it.", file=sys.stderr)
+            signature = signer.sign_ns(NS_DEPLOY, bytes.fromhex(prepared["digest"]))
+            _print(client.call("forge.write", {"deployment_id": prepared["deployment_id"],
+                                               "signature": signature.decode("ascii")}, [out]))
+    finally:
+        os.close(out)
+    return 0
+
+
+def cmd_forge_list(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        _print(client.call("forge.list"))
+    return 0
+
+
+def cmd_forge_retire(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        _print(call_as_owner(client, _signer(*args.auth), "forge.retire", {"instance_id": args.instance_id}))
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="guardian.py", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -254,6 +292,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     r.add_argument("--generate-names", action="store_true")
     r.add_argument("package")
     r.add_argument("dest")
+
+    f = command("forge-build", cmd_forge_build, "build and sign a spinoff deployment")
+    f.add_argument("--auth", nargs=2, required=True, metavar=("KEY_PUB", "HANDLE"))
+    f.add_argument("--instance-id", required=True)
+    f.add_argument("--platform", required=True)
+    f.add_argument("--profile", required=True)
+    f.add_argument("--out", required=True)
+    command("forge-list", cmd_forge_list, "list deployments built by this Guardian Main")
+    f = command("forge-retire", cmd_forge_retire, "retire a deployment at Guardian Main")
+    f.add_argument("--auth", nargs=2, required=True, metavar=("KEY_PUB", "HANDLE"))
+    f.add_argument("--instance-id", required=True)
 
     args = parser.parse_args(argv)
     try:

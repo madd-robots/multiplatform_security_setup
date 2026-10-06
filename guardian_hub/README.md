@@ -6,7 +6,7 @@ Windows. The full plan, stage status and the design changes made along the way
 are in [ROADMAP.md](ROADMAP.md). Read [SECURITY_MODEL.md](SECURITY_MODEL.md)
 for what the code guarantees today and what it does not.
 
-**Status: Stages 1–5 of 9 are implemented.** YubiKey support is tested with software keys; hardware validation on MX is pending. The owner decisions in ROADMAP.md (integrity-first threat model, touch-only YubiKeys, dedicated drives) govern the remaining stages. There is no device analysis,
+**Status: Stages 1–6 of 9 are implemented.** YubiKey support is tested with software keys; hardware validation on MX is pending. The owner decisions in ROADMAP.md (integrity-first threat model, touch-only YubiKeys, dedicated drives) govern the remaining stages. There is no device analysis,
 encryption or YubiKey support yet. Each of those is a later stage, and the
 operations that need them are refused by design until they exist.
 
@@ -46,6 +46,12 @@ guardian_hub/
       enrollment.py           client-side builders for trust events
       owner.py                challenge -> touch -> one-shot grant for one exact request
       operations.py           trust.status/log/init/append
+    forge/                    Stage 6 Guardian Forge (spinoff deployments)
+      profiles.py             platforms (availability) and capability profiles, never Forge rights
+      descriptor.py           deployment descriptor schema, code inventory collection
+      registry.py             Guardian Main's deployment registry (active / retired)
+      service.py              forge.prepare / forge.write / forge.list / forge.retire
+      install.py              target side: verify against a pinned anchor + trust log, extract code
     app.py                    assembles the broker from its services
     runtime/                  Stage 2 security runtime (Linux)
       ipc.py                  length-prefixed canonical frames, deadlines, size bounds
@@ -194,5 +200,15 @@ mode. The suite covers:
   (simulated statvfs). No partial copies or staging are left behind,
   interrupted packages never verify, and a refused package write never
   asks for a signature.
+- **Stage 6:** spinoffs never receive Forge capabilities, and unavailable
+  platforms are refused. The build is tested end to end through the broker,
+  then verified and extracted; the code comes out byte-identical with
+  test-only handlers excluded. Also covered:
+  - building with the backup key
+  - namespace separation in both directions, and refusal of outsider keys
+  - pinned anchor mismatch, later trust logs accepted, diverging logs
+    refused as forks
+  - revoked issuers, unique instance ids, retirement needing a touch
+  - wrong platform, expired descriptors, and wrong package layout
 - **Hygiene:** no `shell=True`, `eval`, `exec`, `pickle`, dynamic imports or
   unbounded reads; ASCII-only, licensed, stdlib-only sources.

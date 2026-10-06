@@ -12,7 +12,7 @@ records where the implementation deviates from it and why.
 | 3 Device engine | USB detection, storage identity, vendor and controller data, capacity verification | **Done** (`usbguardian/devices`); see notes below |
 | 4 Integrity vault (D1, D6) | custody object store, transfer package format, read-back verification, verify-then-release | **Done** (`usbguardian/vault`); see notes below |
 | 5 YubiKey integration | enrollment, authentication, owner verification; manifest signer/verifier, revocation (D3); key rotation and locking; broker vault/transfer operations with fd passing | **Done** (`usbguardian/identity`, `vault/operations.py`); hardware validation pending, see notes |
-| 6 Guardian Forge | spinoff packages, signing, encryption | Not started |
+| 6 Guardian Forge | spinoff creation, deployment packages, signing, registry | **Done** (`usbguardian/forge`); see notes below |
 | 7 Platforms | Debian/MX, then Termux, then Windows | Not started |
 | 8 Device assurance | firmware and artifact verification, erase verification, reports | Not started |
 | 9 Final UI | dashboard, managers, forge, audit viewer | Not started |
@@ -150,13 +150,33 @@ before anything can rely on it, and none was claimed as done.
   itself (stdlib `json`). Only signature checking is sandboxed. This is an
   accepted residual risk, since payload bytes are never parsed.
 
-### Next: Stage 6
+### Stage 6 notes
 
-Guardian Forge: spinoff packages built with the Stage 4 package format and
-signed with owner keys. Each spinoff carries the pinned trust anchor and a
-copy of the trust log, and receives a capability profile and instance id.
-A spinoff never holds signing authority. D5 (offline revocation and
-certificate expiry) is needed before spinoff certificates are final.
+- **Deployment package:** a Stage 4 package signed in the separate
+  namespace `guardian-deploy@v1` (one touch). A transfer can never be
+  installed as a deployment, and a deployment can never be released as a
+  transfer. Objects, in a fixed order:
+  - `deployment.json`, the descriptor: deployment and instance ids,
+    platform, profile, capabilities, issue time, expiry, trust anchor, head
+    and sequence, issuer key, and a code inventory with SHA-256 and length
+  - `trust.log`, a public trust snapshot
+  - `code/<path>`, every shipped source file byte for byte, excluding
+    test-only handlers
+- **Profiles:** full, recovery, storage and diagnostic. No profile can ever
+  include `forge.build` or `forge.prepare`; spinoffs never become
+  authorities. Platforms: `debian-mx` and `rescue-usb` are available.
+  `termux` and `windows` are refused until a runtime exists for them.
+- **Target-side verification** (`forge/install.py`):
+  - trust comes from outside the package: a pinned anchor and a trust log
+    from known-good media
+  - the package must verify in the deploy namespace against that log
+  - the package's own snapshot must agree with it, or it is a fork
+  - the descriptor's head and inventory must match what was signed
+  - platform and expiry are checked
+  - a revoked issuer key is rejected
+- **Registry** on Guardian Main: unique instance ids, active or retired.
+  Retirement is recorded at Main only. Telling offline spinoffs about it
+  needs D5, and the `expires` field stays `null` until D5 is decided.
 
 ## Owner decisions (2026-10-05)
 

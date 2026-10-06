@@ -43,6 +43,7 @@ CAPABILITIES: Dict[str, Capability] = {c.name: c for c in (
     Capability("trust.read", "read enrolled owner keys and the trust anchor"),
     Capability("vault.prepare", "prepare a transfer manifest for signing"),
     Capability("vault.verify", "verify a transfer package without releasing it"),
+    Capability("forge.prepare", "prepare a spinoff deployment for signing and list deployments"),
     Capability("device.modify", "erase, partition or format a device", frozenset({FACTOR_OWNER_KEY})),
     Capability("vault.read", "decrypt vault contents", frozenset({FACTOR_OWNER_KEY})),
     Capability("vault.write", "encrypt into or change a vault", frozenset({FACTOR_OWNER_KEY})),

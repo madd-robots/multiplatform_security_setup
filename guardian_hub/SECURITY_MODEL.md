@@ -1,4 +1,4 @@
-# Security model (Stages 1 to 5)
+# Security model (Stages 1 to 6)
 
 ## Threat model (owner decision D1, see ROADMAP.md)
 
@@ -137,6 +137,18 @@ and deployments were not altered. Secrecy comes second.
   first. Detection relies on the second-instance check and, once built,
   the audit ledger. Recovery is re-rooting from known-good media.
 - Not yet validated with real YubiKeys (see ROADMAP Stage 5 notes).
+
+## Spinoff deployments (Stage 6)
+
+- A deployment authorizes nothing by itself. It carries public keys only,
+  and no profile can contain Forge capabilities, so a spinoff cannot sign,
+  enroll keys or build further spinoffs.
+- A target trusts a deployment only against a pinned anchor and a trust
+  log brought on known-good media, never against the package's own
+  snapshot alone. Diverging logs are refused as a fork.
+- Deployment and transfer signatures use separate namespaces and cannot
+  be interchanged.
+- Not yet: revoking a deployed spinoff while it is offline (D5).
 
 ## Space exhaustion (ROADMAP D8)
 

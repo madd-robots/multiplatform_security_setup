@@ -10,6 +10,8 @@ from typing import FrozenSet, Optional
 from .common.fsutil import ensure_private_dir
 from .common.space import DEFAULT_POLICY, SpacePolicy
 from .devices.operations import device_operations
+from .forge.registry import DeploymentRegistry
+from .forge.service import ForgeService
 from .identity.handlers import WorkerSigCheck
 from .identity.operations import TrustService
 from .identity.owner import OwnerAuthority
@@ -44,5 +46,7 @@ def build_services(launcher: WorkerLauncher, state_dir: Path, *, instance_id: st
     owner = OwnerAuthority(trust, check, instance_id)
     operations = (list(default_operations()) + list(device_operations(launcher)) + list(owner.operations())
                   + list(TrustService(trust).operations())
-                  + list(VaultService(store, trust, check, instance_id, space_policy=space_policy).operations()))
+                  + list(VaultService(store, trust, check, instance_id, space_policy=space_policy).operations())
+                  + list(ForgeService(store, trust, check, DeploymentRegistry(state_dir / "forge"), instance_id,
+                                      space_policy=space_policy).operations()))
     return GuardianServices(Broker(operations, launcher), trust, store, owner)
