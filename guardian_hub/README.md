@@ -6,7 +6,7 @@ Windows. The full plan, stage status and the design changes made along the way
 are in [ROADMAP.md](ROADMAP.md). Read [SECURITY_MODEL.md](SECURITY_MODEL.md)
 for what the code guarantees today and what it does not.
 
-**Status: Stages 1–6 of 9 are implemented.** YubiKey support is tested with software keys; hardware validation on MX is pending. The owner decisions in ROADMAP.md (integrity-first threat model, touch-only YubiKeys, dedicated drives) govern the remaining stages. There is no device analysis,
+**Status: Stages 1–6 of 9 are implemented, and Stage 7 for Debian/MX.** Termux and Windows are not started. YubiKey support is tested with software keys; hardware validation on MX is pending. The owner decisions in ROADMAP.md (integrity-first threat model, touch-only YubiKeys, dedicated drives) govern the remaining stages. There is no device analysis,
 encryption or YubiKey support yet. Each of those is a later stage, and the
 operations that need them are refused by design until they exist.
 
@@ -52,6 +52,7 @@ guardian_hub/
       registry.py             Guardian Main's deployment registry (active / retired)
       service.py              forge.prepare / forge.write / forge.list / forge.retire
       install.py              target side: verify against a pinned anchor + trust log, extract code
+    deploy/debian.py          Stage 7: install a verified deployment on Debian/MX (SysVinit)
     app.py                    assembles the broker from its services
     runtime/                  Stage 2 security runtime (Linux)
       ipc.py                  length-prefixed canonical frames, deadlines, size bounds
@@ -88,6 +89,29 @@ python3 -I -B guardian.py trust-init --socket S \
 Lost key B: `trust-revoke --subject <B key_id> --auth guardian-key-a.pub guardian-key-a`.
 Then enroll its replacement through the remaining key with
 `trust-enroll --new NEW.pub NEW "Key C" --auth guardian-key-a.pub guardian-key-a`.
+
+## Installing on Debian/MX (from the Rescue USB)
+
+On Guardian Main, build a deployment (one touch), then copy it to the
+Rescue USB together with `trust.log` and `trust.anchor` from Main's state
+directory (`/var/lib/usbguardian/trust/`):
+
+```
+python3 -I -B guardian.py forge-build --socket S --auth guardian-key-a.pub guardian-key-a \
+    --instance-id desk --platform debian-mx --profile storage --out desk.gpkg
+```
+
+On the target, as root, booted from the Rescue USB:
+
+```
+adduser --system --group --no-create-home --home /nonexistent --shell /usr/sbin/nologin usbguardian-worker
+python3 -I -B guardian.py install-debian --package desk.gpkg --trust-log trust.log \
+    --trust-anchor trust.anchor --owner-uid 1000 --worker-user usbguardian-worker --dry-run
+python3 -I -B guardian.py install-debian ... --enable-service
+```
+
+Before running the install, compare the anchor printed by the dry run
+with Guardian Main's (`trust-status`).
 
 ## Running the broker
 
@@ -210,5 +234,14 @@ mode. The suite covers:
     refused as forks
   - revoked issuers, unique instance ids, retirement needing a touch
   - wrong platform, expired descriptors, and wrong package layout
+- **Stage 7:** a real signed deployment installed into temporary roots.
+  Checked:
+  - root-owned read-only release, atomic `current`, private trust state
+  - policy, init script syntax, and a broker started from the installed code
+  - production hardware-only policy enforced
+  - tampered packages and a wrong anchor or platform refused without a trace
+  - reinstall refused, switching releases with rollback kept
+  - existing policy preserved, trust-log merge and fork refusal
+  - dry run leaves nothing, and worker-account checks
 - **Hygiene:** no `shell=True`, `eval`, `exec`, `pickle`, dynamic imports or
   unbounded reads; ASCII-only, licensed, stdlib-only sources.

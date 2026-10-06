@@ -1,4 +1,4 @@
-# Security model (Stages 1 to 6)
+# Security model (Stages 1 to 7)
 
 ## Threat model (owner decision D1, see ROADMAP.md)
 
@@ -149,6 +149,20 @@ and deployments were not altered. Secrecy comes second.
 - Deployment and transfer signatures use separate namespaces and cannot
   be interchanged.
 - Not yet: revoking a deployed spinoff while it is offline (D5).
+
+## Installation (Stage 7, Debian/MX)
+
+- The installer trusts only the pinned anchor and trust log the owner
+  brings on known-good media. Signatures are checked in the sandboxed
+  worker as the dedicated worker account.
+- Installed code is root-owned and not writable by others. The broker
+  re-verifies this itself at every start before it runs a worker.
+- An install either completes after full verification or changes nothing.
+  An existing machine's trust state can only be extended, never forked or
+  re-anchored, by an install.
+- USB interface blocking at the kernel level is supplied as a reviewed
+  suggestion, not applied, because applying it blindly can lock out input
+  devices.
 
 ## Space exhaustion (ROADMAP D8)
 

@@ -24,6 +24,11 @@ Guardian Forge (Guardian Main):
     guardian.py forge-list   --socket S
     guardian.py forge-retire --socket S --auth KEY.pub HANDLE --instance-id ID
 
+Install on Debian/MX (root, from the Rescue USB):
+    guardian.py install-debian --package PKG --trust-log trust.log --trust-anchor trust.anchor
+                               --owner-uid UID --worker-user usbguardian-worker
+                               [--platform debian-mx|rescue-usb] [--enable-service] [--replace-policy] [--dry-run]
+
 Any operation:
     guardian.py call OP [--params JSON] [--auth KEY.pub HANDLE] --socket S
 """
@@ -244,6 +249,19 @@ def cmd_forge_retire(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_install_debian(args: argparse.Namespace) -> int:
+    from usbguardian.deploy.debian import install_debian
+    from usbguardian.identity.handlers import WorkerSigCheck
+
+    entry = pwd.getpwnam(args.worker_user)
+    sig_check = WorkerSigCheck(WorkerLauncher(worker_uid=entry.pw_uid, worker_gid=entry.pw_gid))
+    _print(install_debian(Path(args.package), Path(args.trust_log), Path(args.trust_anchor),
+                          owner_uid=args.owner_uid, worker_user=args.worker_user, sig_check=sig_check,
+                          platform=args.platform, replace_policy=args.replace_policy,
+                          enable_service=args.enable_service, dry_run=args.dry_run))
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="guardian.py", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -303,6 +321,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     f = command("forge-retire", cmd_forge_retire, "retire a deployment at Guardian Main")
     f.add_argument("--auth", nargs=2, required=True, metavar=("KEY_PUB", "HANDLE"))
     f.add_argument("--instance-id", required=True)
+
+    d = command("install-debian", cmd_install_debian, "install a verified deployment on Debian/MX", socket=False)
+    d.add_argument("--package", required=True)
+    d.add_argument("--trust-log", required=True)
+    d.add_argument("--trust-anchor", required=True)
+    d.add_argument("--owner-uid", type=int, required=True)
+    d.add_argument("--worker-user", required=True)
+    d.add_argument("--platform", default="debian-mx", choices=["debian-mx", "rescue-usb"])
+    d.add_argument("--enable-service", action="store_true")
+    d.add_argument("--replace-policy", action="store_true")
+    d.add_argument("--dry-run", action="store_true")
 
     args = parser.parse_args(argv)
     try:

@@ -13,7 +13,7 @@ records where the implementation deviates from it and why.
 | 4 Integrity vault (D1, D6) | custody object store, transfer package format, read-back verification, verify-then-release | **Done** (`usbguardian/vault`); see notes below |
 | 5 YubiKey integration | enrollment, authentication, owner verification; manifest signer/verifier, revocation (D3); key rotation and locking; broker vault/transfer operations with fd passing | **Done** (`usbguardian/identity`, `vault/operations.py`); hardware validation pending, see notes |
 | 6 Guardian Forge | spinoff creation, deployment packages, signing, registry | **Done** (`usbguardian/forge`); see notes below |
-| 7 Platforms | Debian/MX, then Termux, then Windows | Not started |
+| 7 Platforms | Debian/MX first, then Termux, then Windows | **Debian/MX done** (`usbguardian/deploy`); Termux and Windows not started, see notes |
 | 8 Device assurance | firmware and artifact verification, erase verification, reports | Not started |
 | 9 Final UI | dashboard, managers, forge, audit viewer | Not started |
 
@@ -25,8 +25,10 @@ before anything can rely on it, and none was claimed as done.
 - seccomp-bpf syscall filter for workers
 - Landlock filesystem restriction, so workers can read only the paths a job needs
 - network namespace (or seccomp socket denial), so parser workers have no network
-- the dedicated worker account, SysVinit service and root-owned install
-  location (Stage 7 packaging)
+- ~~the dedicated worker account, SysVinit service and root-owned install
+  location~~: done in Stage 7. The installer refuses a shared or privileged
+  worker account and prints the `adduser` command; it does not create the
+  account itself.
 
 ### Stage 3 notes
 
@@ -149,6 +151,54 @@ before anything can rely on it, and none was claimed as done.
 - The receiving broker parses the bounded, strictly canonical manifest
   itself (stdlib `json`). Only signature checking is sandboxed. This is an
   accepted residual risk, since payload bytes are never parsed.
+
+### Stage 7 notes
+
+- **Debian/MX** (`deploy/debian.py`, `guardian.py install-debian`): run as
+  root from the Rescue USB with the deployment package plus `trust.log` and
+  `trust.anchor` copied from Guardian Main.
+  - Signatures are verified in the sandboxed worker as the dedicated
+    worker account.
+  - The code goes to `/opt/usbguardian/releases/<id>`, root-owned and
+    read-only. `current` is switched atomically, and old releases are kept
+    for rollback.
+  - State goes to `/var/lib/usbguardian` (private), with a trust log that
+    must agree with the installed one (longer kept; a fork is refused).
+  - Also written: `/etc/usbguardian/policy.json` (never overwritten without
+    `--replace-policy`), a SysVinit script (enabled only with
+    `--enable-service`), and a *suggested* USBGuard rule set that is not
+    applied, because a wrong rule set can lock out the keyboard.
+  - Nothing is placed under a final path before verification, and a failed
+    install leaves the previous installation as it was.
+- **Validated here:**
+  - an install into temporary roots
+  - a broker started from the installed tree (its own code-tree check
+    passes there)
+  - the generated init script's syntax (`sh -n`)
+- **Not yet validated on MX:** starting, stopping and enabling the
+  SysVinit service, and `update-rc.d`.
+- **Upgrades:** Forge refuses to reuse an instance id, so reissuing a
+  deployment for the same machine needs a Forge "reissue" operation. That
+  is planned with D5, because expiry and reissue belong together. The
+  installer already supports switching releases.
+- **Termux: not started.** Without root there is no privilege separation
+  (development mode only) and no raw device access; USB goes through the
+  Android USB host API (`termux-usb`). The fitting first role is a
+  **verifier-only spinoff**: it checks transfers and deployments, keeps a
+  pinned trust log and releases files, and signs nothing. That is exactly
+  the independent second instance D1 asks for. It needs a single-process,
+  non-root runtime mode, which is not built yet.
+- **Windows: not started.** It needs its own service, ACL and named-pipe
+  implementation, as the build guide says. The formats are already
+  portable: canonical JSON (an RFC 8785 subset), SSHSIG via the
+  `ssh-keygen` that ships with Windows, and the package format.
+
+### Next: Stage 8
+
+Advanced device assurance: the signed, hash-chained audit ledger (the
+threat model relies on it), firmware and artifact verification reports
+(stating only what the hardware exposes, per D4), and erase-verification
+reports built on the Stage 3 surface test.
 
 ### Stage 6 notes
 
