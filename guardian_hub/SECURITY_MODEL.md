@@ -1,4 +1,4 @@
-# Security model (Stages 1 to 4)
+# Security model (Stages 1 to 5)
 
 ## Threat model (owner decision D1, see ROADMAP.md)
 
@@ -20,8 +20,10 @@ and deployments were not altered. Secrecy comes second.
      booted read-only, never an everyday installed OS.
   2. Verify on a second, independent Guardian instance (for example the
      Termux spinoff) before trusting anything that was signed.
-  3. Every signature is recorded in the signed, hash-chained audit ledger,
-     so an unexpected signature shows up afterwards.
+  3. Every signature is to be recorded in the signed, hash-chained audit
+     ledger, so an unexpected signature shows up afterwards. The ledger is
+     planned (Stage 8); until then the broker's private log records every
+     authorization decision.
 - On a compromised host, Guardian's own display of a result can be forged.
   A verification only counts when it runs on an instance you trust.
 
@@ -117,6 +119,24 @@ and deployments were not altered. Secrecy comes second.
   the USB transport is cryptographic; integrity on a compromised host
   during processing is bounded by the D1 rules (known-good boot, second
   instance).
+
+## Owner keys and assertions (Stage 5)
+
+- Authority comes from fresh signatures by enrolled YubiKey security keys.
+  Each one needs a touch; no PIN is used. A key's serial number is never
+  used to authenticate.
+- Each touch authorizes one thing: a specific request (challenge-bound,
+  single use, tied to the connection, uid and exact parameters), a specific
+  manifest, or a specific trust event. Signatures are domain-separated by
+  namespace, so one made for one purpose is useless for another.
+- Signature verification sees only one enrolled key and one namespace per
+  call, and runs `ssh-keygen` inside the sandboxed worker.
+- The trust log is signed and hash-chained from a pinned anchor. A revoked
+  key, or any key not in the active set, is rejected everywhere.
+- Accepted risk (D3): someone holding one stolen key can revoke the other
+  first. Detection relies on the second-instance check and, once built,
+  the audit ledger. Recovery is re-rooting from known-good media.
+- Not yet validated with real YubiKeys (see ROADMAP Stage 5 notes).
 
 ## Known limitations (not hidden, not yet fixed)
 

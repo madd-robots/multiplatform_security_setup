@@ -20,6 +20,7 @@ from __future__ import annotations
 import errno
 import os
 import secrets
+import stat
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -53,13 +54,22 @@ def plan_names(objects: List[Dict[str, Any]], policy: str) -> List[Tuple[str, bo
 
 
 class _StagingSink:
-    def __init__(self, dest_fd: int, policy: str, file_mode: int):
+    def __init__(self, dest_fd: int, policy: str, file_mode: int, owner: Optional[Tuple[int, int]]):
         self.dest_fd = dest_fd
         self.policy = policy
         self.file_mode = file_mode
+        self.owner = owner
         self.staging = ".guardian-staging-" + secrets.token_hex(8)
         os.mkdir(self.staging, 0o700, dir_fd=dest_fd)
-        self.staging_fd = open_dir_nofollow(self.staging, dir_fd=dest_fd)
+        try:
+            self.staging_fd = open_dir_nofollow(self.staging, dir_fd=dest_fd)
+            st = os.fstat(self.staging_fd)
+        except OSError:
+            raise SecurityViolation("staging directory was replaced", code="UNTRUSTED_PATH") from None
+        if st.st_uid != os.geteuid() or stat.S_IMODE(st.st_mode) != 0o700:
+            # Someone who can write the destination swapped our directory.
+            os.close(self.staging_fd)
+            raise SecurityViolation("staging directory was replaced", code="UNTRUSTED_PATH")
         self.names: List[Tuple[str, bool]] = []
         self.manifest: Optional[Dict[str, Any]] = None
         self._out = -1
@@ -76,6 +86,9 @@ class _StagingSink:
     def begin(self, index: int, obj: Dict[str, Any]) -> None:
         self._out = os.open("obj-%d" % index, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
                             0o600, dir_fd=self.staging_fd)
+        if self.owner is not None:
+            os.fchown(self._out, self.owner[0], self.owner[1])  # released files belong to the requester
+        os.fchmod(self._out, self.file_mode)
 
     def write(self, data: bytes) -> None:
         write_all(self._out, data)
@@ -91,7 +104,6 @@ class _StagingSink:
         try:
             for index, (final, _) in enumerate(self.names):
                 staged = "obj-%d" % index
-                os.chmod(staged, self.file_mode, dir_fd=self.staging_fd)
                 _move_no_replace(self.staging_fd, staged, self.dest_fd, final)
                 published.append(final)
             fsync_dir(self.dest_fd)
@@ -139,29 +151,38 @@ def _move_no_replace(src_dir: int, src: str, dst_dir: int, dst: str) -> None:
     os.unlink(src, dir_fd=src_dir)
 
 
-def _open_destination(dest_dir: Path) -> int:
+def _open_destination(dest_dir: Optional[Path], dest_fd: Optional[int], owner_uid: int) -> int:
     try:
-        fd = open_dir_nofollow(dest_dir)
+        fd = os.dup(dest_fd) if dest_fd is not None else open_dir_nofollow(dest_dir)  # type: ignore[arg-type]
     except OSError as exc:
         raise SecurityViolation("cannot open destination: %s" % exc.strerror, code="UNTRUSTED_PATH") from None
     st = os.fstat(fd)
-    if st.st_uid != os.geteuid() or st.st_mode & 0o022:
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != owner_uid or st.st_mode & 0o022:
         os.close(fd)
-        raise SecurityViolation("destination must be owned by this user and not writable by others",
+        raise SecurityViolation("destination must be a directory owned by the requester and not writable by others",
                                 code="UNTRUSTED_PATH")
     return fd
 
 
-def release_package(fd: int, verifier: Verifier, dest_dir: Path, *, start: int = 0, require_end: bool = True,
+def release_package(fd: int, verifier: Verifier, dest_dir: Optional[Path] = None, *, dest_fd: Optional[int] = None,
+                    owner: Optional[Tuple[int, int]] = None, start: int = 0, require_end: bool = True,
                     name_policy: str = "strict", file_mode: int = 0o600) -> Dict[str, Any]:
-    """Verify a package and, only if every check passes, release its objects into ``dest_dir``."""
+    """Verify a package and, only if every check passes, release its objects into the destination.
+
+    The destination is a path or an open directory fd (from a broker client).
+    With ``owner`` (uid, gid), released files are owned by that user and the
+    destination must belong to them.
+    """
+    if (dest_dir is None) == (dest_fd is None):
+        raise ValidationError("give exactly one of dest_dir or dest_fd")
     if file_mode & ~0o644 or not file_mode & 0o400:
         raise ValidationError("file mode must be readable by the owner and not writable by others")
     if name_policy not in NAME_POLICIES:
         raise ValidationError("unknown name policy")
-    dest_fd = _open_destination(Path(dest_dir))
+    dest_fd = _open_destination(None if dest_dir is None else Path(dest_dir), dest_fd,
+                                owner[0] if owner is not None else os.geteuid())
     try:
-        sink = _StagingSink(dest_fd, name_policy, file_mode)
+        sink = _StagingSink(dest_fd, name_policy, file_mode, owner)
         try:
             report = verify_package(fd, verifier, start=start, sink=sink, require_end=require_end)
             sink.publish()

@@ -22,17 +22,22 @@ import re
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, Optional
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 from .. import APP_NAME, APP_VERSION
-from ..common.errors import (GuardianError, NotFound, PermissionDenied, ResourceLimitExceeded,
-                             as_guardian_error)
+from ..common.errors import (GuardianError, NotFound, PermissionDenied, ProtocolError, ResourceLimitExceeded,
+                             ValidationError, as_guardian_error)
 from ..common.log import get_logger, log_event
 from . import authz, ipc
 from . import schema as S
+from .session import Session
 from .workers import WorkerLauncher, WorkerProfile
 
-InlineFunc = Callable[[authz.Principal, Dict[str, Any]], Any]
+InlineFunc = Callable[..., Any]
+# Verifies a signature carried inside the request itself (for example a
+# signed manifest or trust event) and returns True if it proves owner
+# presence for exactly this request.
+OwnerProof = Callable[[authz.Principal, Dict[str, Any], Optional[Session]], bool]
 
 
 @dataclass(frozen=True)
@@ -43,8 +48,15 @@ class Operation:
     inline: Optional[InlineFunc] = None
     worker_handler: Optional[str] = None
     profile: Optional[WorkerProfile] = None
+    session_aware: bool = False       # inline(principal, params, session)
+    owner_proof: Optional[OwnerProof] = None
+    fds: Tuple[int, int] = (0, 0)     # allowed number of passed file descriptors
 
     def __post_init__(self) -> None:
+        if not 0 <= self.fds[0] <= self.fds[1] <= ipc.MAX_FDS:
+            raise ValueError("operation %s has an invalid fd range" % self.name)
+        if (self.session_aware or self.fds[1]) and self.inline is None:
+            raise ValueError("operation %s: sessions and fds need an inline handler" % self.name)
         if self.capability not in authz.CAPABILITIES:
             raise ValueError("operation %s uses unknown capability %s" % (self.name, self.capability))
         if (self.inline is None) == (self.worker_handler is None):
@@ -87,7 +99,7 @@ class Broker:
         self.logger = logger or get_logger("broker")
         self._worker_slots = threading.BoundedSemaphore(max_concurrent_workers)
 
-    def handle(self, principal: authz.Principal, message: Any) -> Dict[str, Any]:
+    def handle(self, principal: authz.Principal, message: Any, session: Optional[Session] = None) -> Dict[str, Any]:
         """Answer one request.  Never raises; every failure becomes an error response."""
         request_id = "invalid"
         op_name = "invalid"
@@ -102,14 +114,20 @@ class Broker:
             op = self.operations.get(op_name)
             if op is None:
                 raise NotFound("unknown operation")
-            decision = authz.decide(principal, op.capability)
+            nfds = len(session.fds) if session is not None else 0
+            if request.get("fds", 0) != nfds:
+                raise ProtocolError("declared and received file descriptors differ")
+            principal, decision, factor_source = self._authorize(principal, op, request, session)
             log_event(self.logger, logging.INFO if decision.allowed else logging.WARNING, "authz.decision",
                       principal=principal.name, uid=principal.uid, op=op_name, capability=op.capability,
-                      allowed=decision.allowed, reason=decision.reason, request_id=request_id)
+                      allowed=decision.allowed, reason=decision.reason, request_id=request_id,
+                      factor_source=factor_source)
             if not decision.allowed:
                 raise PermissionDenied("operation requires %s (%s)" % (op.capability, decision.reason))
+            if not op.fds[0] <= nfds <= op.fds[1]:
+                raise ValidationError("operation %s takes %d..%d file descriptors" % (op_name, op.fds[0], op.fds[1]))
             params = S.validate(op.params, request["params"], "$.params")
-            result = self._execute(op, principal, params)
+            result = self._execute(op, principal, params, session)
             response = ipc.ok_response(request_id, result)
             ipc.encode_frame(response)  # result must be canonical and fit in a frame
             outcome = "OK"
@@ -124,8 +142,29 @@ class Broker:
                   request_id=request_id, outcome=outcome, ms=int((time.monotonic() - started) * 1000))
         return response
 
-    def _execute(self, op: Operation, principal: authz.Principal, params: Dict[str, Any]) -> Any:
+    def _authorize(self, principal: authz.Principal, op: Operation, request: Dict[str, Any],
+                   session: Optional[Session]) -> Tuple[authz.Principal, authz.Decision, Optional[str]]:
+        """Default deny.  The owner_key factor comes only from a one-shot grant
+        created by a verified YubiKey assertion for this exact request, or from
+        a signature the request itself carries (owner_proof)."""
+        decision = authz.decide(principal, op.capability)
+        if decision.reason != "FACTOR_REQUIRED":
+            return principal, decision, None
+        source = None
+        digest = authz.request_digest(op.name, request["params"])
+        if session is not None and session.consume_grant(op.name, digest):
+            principal, source = principal.with_factor(authz.FACTOR_OWNER_KEY), "assertion"
+        elif op.owner_proof is not None:
+            params = S.validate(op.params, request["params"], "$.params")
+            if op.owner_proof(principal, params, session):
+                principal, source = principal.with_factor(authz.FACTOR_OWNER_KEY), "embedded_signature"
+        return principal, authz.decide(principal, op.capability), source
+
+    def _execute(self, op: Operation, principal: authz.Principal, params: Dict[str, Any],
+                 session: Optional[Session]) -> Any:
         if op.inline is not None:
+            if op.session_aware:
+                return op.inline(principal, params, session)
             return op.inline(principal, params)
         assert op.worker_handler is not None and op.profile is not None
         if not self._worker_slots.acquire(timeout=5):

@@ -6,7 +6,7 @@ Windows. The full plan, stage status and the design changes made along the way
 are in [ROADMAP.md](ROADMAP.md). Read [SECURITY_MODEL.md](SECURITY_MODEL.md)
 for what the code guarantees today and what it does not.
 
-**Status: Stages 1–4 of 9 are implemented.** The owner decisions in ROADMAP.md (integrity-first threat model, touch-only YubiKeys, dedicated drives) govern the remaining stages. There is no device analysis,
+**Status: Stages 1–5 of 9 are implemented.** YubiKey support is tested with software keys; hardware validation on MX is pending. The owner decisions in ROADMAP.md (integrity-first threat model, touch-only YubiKeys, dedicated drives) govern the remaining stages. There is no device analysis,
 encryption or YubiKey support yet. Each of those is a later stage, and the
 operations that need them are refused by design until they exist.
 
@@ -34,7 +34,17 @@ guardian_hub/
       custody.py              private content-addressed custody store, intake with read-back
       package.py              transfer package v1: write, read-back, verify (fail closed)
       release.py              verify-then-release via staging, no overwrite, name policy
-      auth.py                 signer/verifier interface (YubiKey implementation: Stage 5)
+      auth.py                 signer/verifier interface
+      operations.py           vault.intake, transfer.prepare/write/verify/release (fd passing)
+    identity/                 Stage 5 YubiKey owner keys (ROADMAP D2, D3)
+      sshkeys.py              strict OpenSSH public-key parsing, key ids, hardware-only policy
+      sshsig.py               ssh-keygen -Y sign (touch) / verify (pipes, one key, one namespace)
+      handlers.py             sandboxed signature verification worker
+      trust.py                signed hash-chained trust log: genesis, enroll, revoke
+      enrollment.py           client-side builders for trust events
+      owner.py                challenge -> touch -> one-shot grant for one exact request
+      operations.py           trust.status/log/init/append
+    app.py                    assembles the broker from its services
     runtime/                  Stage 2 security runtime (Linux)
       ipc.py                  length-prefixed canonical frames, deadlines, size bounds
       schema.py               strict validators for every message and parameter
@@ -49,8 +59,27 @@ guardian_hub/
   tests/
 ```
 
-Requirements: Linux, Python 3.10 or newer, standard library only. MX Linux 23
+Requirements: Linux, Python 3.10 or newer (standard library only), and `openssh-client` for `ssh-keygen -Y`. MX Linux 23
 (Debian 12, Python 3.11) is the reference target.
+
+## Owner keys (once, from the Rescue USB)
+
+Create one security-key SSH key on each YubiKey. The handle file is useless
+without its YubiKey, but it cannot be recovered from the YubiKey either, so
+back up both handles on the Rescue USB. Do not add `-O no-touch-required`
+or `-O verify-required`: Guardian uses touch and no PIN.
+
+```
+ssh-keygen -t ed25519-sk -O application=ssh:guardian -N '' -f guardian-key-a   # YubiKey A inserted
+ssh-keygen -t ed25519-sk -O application=ssh:guardian -N '' -f guardian-key-b   # YubiKey B inserted
+python3 -I -B guardian.py key-info guardian-key-a.pub
+python3 -I -B guardian.py trust-init --socket S \
+    --owner guardian-key-a.pub guardian-key-a "Key A" --owner guardian-key-b.pub guardian-key-b "Key B"
+```
+
+Lost key B: `trust-revoke --subject <B key_id> --auth guardian-key-a.pub guardian-key-a`.
+Then enroll its replacement through the remaining key with
+`trust-enroll --new NEW.pub NEW "Key C" --auth guardian-key-a.pub guardian-key-a`.
 
 ## Running the broker
 
@@ -64,7 +93,7 @@ sudo adduser --system --group --no-create-home usbguardian-worker
 sudo install -d -m 0755 /run/usbguardian
 sudo python3 -I -B guardian.py broker \
     --policy /etc/usbguardian/policy.json \
-    --socket /run/usbguardian/broker.sock --socket-mode 600 \
+    --socket /run/usbguardian/broker.sock --socket-mode 600 --state-dir /var/lib/usbguardian \
     --worker-user usbguardian-worker \
     --log-file /var/log/usbguardian-broker.log
 ```
@@ -142,5 +171,20 @@ mode. The suite covers:
   tampering, read-back of a corrupted or different medium, raw-device
   offsets, release name policies, no-overwrite release and cleanup after a
   late failure. Signatures in these tests use a test-only HMAC verifier.
+- **Stage 5** (real `ssh-keygen`, ordinary ed25519 keys under an explicit
+  test-only policy): key parsing and fingerprints, namespace separation,
+  armor checks, and a handle/key mismatch. Trust-log tests cover:
+  - the full lifecycle, two-key limit, possession proofs and outsider keys
+  - revoked keys returning, last-key protection, forks and anchor pinning
+  - store tampering, and old signatures by revoked keys
+
+  Owner-assertion tests cover one-shot grants bound to parameters,
+  connection, op and uid, nonce reuse and expiry, revoked or outsider keys,
+  and a missing capability. End-to-end socket tests cover fd passing,
+  intake, signing, write with read-back, verify, release with the backup
+  key, refusal without a touch, revocation applying to existing packages,
+  replacement enrollment, fd validation and fd-count mismatch. Two
+  mutations (grant not consumed, uid not bound) were confirmed to fail the
+  suite.
 - **Hygiene:** no `shell=True`, `eval`, `exec`, `pickle`, dynamic imports or
   unbounded reads; ASCII-only, licensed, stdlib-only sources.

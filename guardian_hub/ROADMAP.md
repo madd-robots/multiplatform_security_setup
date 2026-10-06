@@ -11,7 +11,7 @@ records where the implementation deviates from it and why.
 | 2 Security runtime | privilege separation, broker, worker isolation, IPC, authorization | **Done**, with the hardening listed below still open (`usbguardian/runtime`) |
 | 3 Device engine | USB detection, storage identity, vendor and controller data, capacity verification | **Done** (`usbguardian/devices`); see notes below |
 | 4 Integrity vault (D1, D6) | custody object store, transfer package format, read-back verification, verify-then-release | **Done** (`usbguardian/vault`); see notes below |
-| 5 YubiKey integration | enrollment, authentication, owner verification; manifest signer/verifier, revocation (D3); optional encryption, key management, rotation, locking (moved from Stage 4); broker vault/transfer operations with fd passing | Not started |
+| 5 YubiKey integration | enrollment, authentication, owner verification; manifest signer/verifier, revocation (D3); key rotation and locking; broker vault/transfer operations with fd passing | **Done** (`usbguardian/identity`, `vault/operations.py`); hardware validation pending, see notes |
 | 6 Guardian Forge | spinoff packages, signing, encryption | Not started |
 | 7 Platforms | Debian/MX, then Termux, then Windows | Not started |
 | 8 Device assurance | firmware and artifact verification, erase verification, reports | Not started |
@@ -96,14 +96,67 @@ before anything can rely on it, and none was claimed as done.
     Termux cannot open raw devices, so the layout choice per platform and
     the whole-volume check for a filesystem layout belong to Stage 7.
 
-### Next: Stage 5
+### Stage 5 notes
 
-YubiKey integration under D2/D3: enrollment of both keys by fresh
-cryptographic proof, touch-gated signing of manifests (signer/verifier for
-`vault/auth.py`), revocation and replacement signed by the remaining key,
-the `owner_key` factor for the broker, fd passing on the broker socket,
-the vault/transfer operations, and optional encryption with YubiKey-wrapped
-keys.
+- **Owner keys** are FIDO2 security-key SSH keys (`sk-ssh-ed25519`)
+  created on each YubiKey. Signing goes through `ssh-keygen -Y sign`: touch
+  only, no PIN. Verification goes through `ssh-keygen -Y verify` with one
+  allowed-signers entry per call, restricted to one namespace and without
+  `no-touch-required`, so an untouched signature does not verify. It runs
+  in a sandboxed worker, and signature input reaches it through pipes.
+  Requirement: `openssh-client` (Debian/MX, Termux and Windows all ship it).
+- **Trust log** (`identity/trust.py`): a hash chain of signed events
+  (genesis, enroll, revoke) with a pinned anchor.
+  - At most two keys are active. Either key alone authorizes, and either
+    can revoke or replace the other (D3).
+  - A revoked key never returns, and its signatures, even old ones, are
+    rejected.
+  - The last key cannot be revoked; losing every key means re-rooting from
+    known-good media.
+  - Forks and anchor mismatches fail closed.
+  - Serial numbers are labels only. Production accepts only hardware key
+    types.
+- **Owner assertions** (`identity/owner.py`): challenge, one touch, then a
+  one-shot grant bound to the connection, the uid, the operation and the
+  digest of its exact parameters. A signed manifest or trust event is
+  itself the owner proof for writing it. There is no session-wide unlock.
+  That is how "locking" is met: nothing is ever left unlocked.
+- **Key rotation** means revoking and enrolling through the trust log, so
+  there are no epochs of secret material to rotate.
+- **Broker operations**: `auth.*`, `trust.*`, `vault.intake`,
+  `transfer.prepare/write/verify/release`. Files and directories arrive as
+  passed descriptors (SCM_RIGHTS), so the broker never opens client paths.
+  Released files belong to the requesting user. Payloads never cross JSON
+  frames.
+- **Not yet validated on hardware:** CI has no YubiKey. The identical code
+  path is tested with real `ssh-keygen` and ordinary ed25519 keys under an
+  explicit test-only key-type policy. These must be checked on MX with the
+  owner's two YubiKeys:
+  - creating `ed25519-sk` keys
+  - that signing needs a touch
+  - that an untouched signature is refused
+  - backing up the key handles
+- **Deferred again: optional encryption.** No PIN-free, YubiKey-backed
+  encryption tool is packaged in Debian/MX: `age-plugin-yubikey` is not
+  in Debian, and the standard library has no AEAD cipher. Adding one
+  means a new dependency (`age` with a FIDO2 plugin, or
+  python3-cryptography with `fido2-tools` hmac-secret). That is an owner
+  decision (D7, pending). Integrity does not depend on it (D1).
+- **Not built yet: the signed audit ledger** that the threat model relies on
+  to spot unexpected signatures. Today the broker logs every authorization
+  decision and outcome to its private log; the hash-chained, signed ledger
+  is planned with Stage 8 (artifact verification and reports).
+- The receiving broker parses the bounded, strictly canonical manifest
+  itself (stdlib `json`). Only signature checking is sandboxed. This is an
+  accepted residual risk, since payload bytes are never parsed.
+
+### Next: Stage 6
+
+Guardian Forge: spinoff packages built with the Stage 4 package format and
+signed with owner keys. Each spinoff carries the pinned trust anchor and a
+copy of the trust log, and receives a capability profile and instance id.
+A spinoff never holds signing authority. D5 (offline revocation and
+certificate expiry) is needed before spinoff certificates are final.
 
 ## Owner decisions (2026-10-05)
 
@@ -199,6 +252,12 @@ write-protect switch for read-only roles such as the Rescue USB.
 
 **D5 (pending).** Offline revocation and certificate expiry for spinoffs
 (design review item 5) is waiting on the owner.
+
+**D7 (pending). Optional encryption dependency.** Confidentiality needs an
+AEAD cipher and a PIN-free YubiKey-backed key. Neither is in the standard
+library or packaged in Debian/MX in a form that meets D2. Options: `age`
+with a FIDO2/PIV plugin, or python3-cryptography plus `fido2-tools`
+(hmac-secret). Waiting on the owner.
 
 **D6. Custody integrity: Guardian attests custody, not provenance.**
 *(Settled 2026-10-05.)*

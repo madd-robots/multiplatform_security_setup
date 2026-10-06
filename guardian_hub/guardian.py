@@ -2,8 +2,25 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Guardian USB Encryption Hub command line.  Run with: python3 -I -B guardian.py
 
-    guardian.py broker --policy FILE --socket PATH [--worker-user NAME] [--log-file FILE]
-    guardian.py call OP [--params JSON] --socket PATH
+Broker (root, from the Rescue USB or installed system):
+    guardian.py broker --policy FILE --socket PATH --state-dir DIR [--worker-user NAME]
+                       [--instance-id ID] [--log-file FILE]
+
+Owner keys (each signature needs a touch on the YubiKey; no PIN, no password):
+    guardian.py key-info KEY.pub
+    guardian.py trust-init   --socket S --owner KEY.pub HANDLE LABEL [--owner KEY.pub HANDLE LABEL]
+    guardian.py trust-enroll --socket S --new KEY.pub HANDLE LABEL --auth KEY.pub HANDLE
+    guardian.py trust-revoke --socket S --subject KEY_ID --auth KEY.pub HANDLE --reason TEXT
+    guardian.py trust-status --socket S
+
+Custody and transfers:
+    guardian.py intake           --socket S --auth KEY.pub HANDLE FILE...
+    guardian.py transfer-write   --socket S --auth KEY.pub HANDLE --out PACKAGE RECORD_ID...
+    guardian.py transfer-verify  --socket S PACKAGE
+    guardian.py transfer-release --socket S --auth KEY.pub HANDLE [--generate-names] PACKAGE DEST_DIR
+
+Any operation:
+    guardian.py call OP [--params JSON] [--auth KEY.pub HANDLE] --socket S
 """
 
 from __future__ import annotations
@@ -16,21 +33,49 @@ import pwd
 import signal
 import sys
 from pathlib import Path
+from typing import Any, List, Optional
 
 # -I removes the script directory from sys.path; append (never prepend) it.
 sys.path.append(str(Path(__file__).resolve().parent))
 
+from usbguardian.app import build_services  # noqa: E402
 from usbguardian.common.canonical import canonical_loads  # noqa: E402
-from usbguardian.common.errors import GuardianError  # noqa: E402
+from usbguardian.common.errors import GuardianError, ValidationError  # noqa: E402
+from usbguardian.common.fsutil import read_file_bounded  # noqa: E402
 from usbguardian.common.log import configure_logging  # noqa: E402
 from usbguardian.common.text import display_text  # noqa: E402
-from usbguardian.devices.operations import device_operations  # noqa: E402
+from usbguardian.identity import enrollment  # noqa: E402
+from usbguardian.identity.owner import call_as_owner  # noqa: E402
+from usbguardian.identity.sshkeys import parse_public_key  # noqa: E402
+from usbguardian.identity.sshsig import NS_TRANSFER, SshKeygenSigner  # noqa: E402
 from usbguardian.runtime.authz import Policy  # noqa: E402
-from usbguardian.runtime.broker import Broker, default_operations  # noqa: E402
 from usbguardian.runtime.client import BrokerClient  # noqa: E402
 from usbguardian.runtime.sandbox import make_non_dumpable  # noqa: E402
 from usbguardian.runtime.server import BrokerServer  # noqa: E402
 from usbguardian.runtime.workers import WorkerLauncher  # noqa: E402
+
+
+def _print(result: Any) -> None:
+    print(json.dumps(result, indent=2, sort_keys=True, ensure_ascii=True))
+
+
+def _signer(pub: str, handle: str) -> SshKeygenSigner:
+    key = parse_public_key(read_file_bounded(Path(pub), 8192).decode("ascii", "replace"))
+    return SshKeygenSigner(handle, key)
+
+
+def _client(args: argparse.Namespace) -> BrokerClient:
+    return BrokerClient(Path(args.socket), timeout=180.0)  # allow time for a touch
+
+
+def _open_ro(path: str, directory: bool = False) -> int:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | (os.O_DIRECTORY if directory else 0)
+    return os.open(path, flags)
+
+
+def _close(fds: List[int]) -> None:
+    for fd in fds:
+        os.close(fd)
 
 
 def cmd_broker(args: argparse.Namespace) -> int:
@@ -48,9 +93,8 @@ def cmd_broker(args: argparse.Namespace) -> int:
         print("WARNING: development mode. Workers run as your own user; the sandbox limits them but does not "
               "separate them from your files. Run the broker as root with --worker-user for real use.",
               file=sys.stderr)
-    operations = list(default_operations()) + list(device_operations(launcher))
-    server = BrokerServer(Broker(operations, launcher), policy, Path(args.socket),
-                          socket_mode=int(args.socket_mode, 8))
+    services = build_services(launcher, Path(args.state_dir), instance_id=args.instance_id)
+    server = BrokerServer(services.broker, policy, Path(args.socket), socket_mode=int(args.socket_mode, 8))
     signal.signal(signal.SIGTERM, lambda *_: server.stop())
     signal.signal(signal.SIGINT, lambda *_: server.stop())
     server.serve_forever()
@@ -59,27 +103,158 @@ def cmd_broker(args: argparse.Namespace) -> int:
 
 def cmd_call(args: argparse.Namespace) -> int:
     params = canonical_loads(args.params.encode("utf-8")) if args.params else {}
-    with BrokerClient(Path(args.socket)) as client:
-        result = client.call(args.op, params)
-    print(json.dumps(result, indent=2, sort_keys=True, ensure_ascii=True))
+    with _client(args) as client:
+        if args.auth:
+            _print(call_as_owner(client, _signer(*args.auth), args.op, params))
+        else:
+            _print(client.call(args.op, params))
     return 0
 
 
-def main(argv: "list[str] | None" = None) -> int:
+def cmd_key_info(args: argparse.Namespace) -> int:
+    key = parse_public_key(read_file_bounded(Path(args.pub), 8192).decode("ascii", "replace"))
+    _print({"key_id": key.key_id, "openssh_fingerprint": key.openssh_fingerprint, "key_type": key.key_type})
+    return 0
+
+
+def cmd_trust_init(args: argparse.Namespace) -> int:
+    keys = [(_signer(pub, handle), label, None) for pub, handle, label in args.owner]
+    print("Touch each YubiKey when it blinks (one touch per key).", file=sys.stderr)
+    envelope = enrollment.genesis(keys)
+    with _client(args) as client:
+        _print(client.call("trust.init", {"envelope": envelope}))
+    return 0
+
+
+def _head(client: BrokerClient) -> "tuple[str, int]":
+    status = client.call("trust.status")
+    if not status.get("initialized"):
+        raise ValidationError("trust is not initialized")
+    return status["head"], status["seq"]
+
+
+def cmd_trust_enroll(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        head, seq = _head(client)
+        print("Touch the enrolled key, then the new key.", file=sys.stderr)
+        envelope = enrollment.enroll(head, seq, _signer(args.new[0], args.new[1]), args.new[2], None,
+                                     _signer(*args.auth))
+        _print(client.call("trust.append", {"envelope": envelope}))
+    return 0
+
+
+def cmd_trust_revoke(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        head, seq = _head(client)
+        envelope = enrollment.revoke(head, seq, args.subject, _signer(*args.auth), args.reason)
+        _print(client.call("trust.append", {"envelope": envelope}))
+    return 0
+
+
+def cmd_trust_status(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        _print(client.call("trust.status"))
+    return 0
+
+
+def cmd_intake(args: argparse.Namespace) -> int:
+    fds = [_open_ro(path) for path in args.files]
+    try:
+        with _client(args) as client:
+            _print(call_as_owner(client, _signer(*args.auth), "vault.intake",
+                                 {"names": [os.path.basename(p) for p in args.files]}, fds))
+    finally:
+        _close(fds)
+    return 0
+
+
+def cmd_transfer_write(args: argparse.Namespace) -> int:
+    signer = _signer(*args.auth)
+    out = os.open(args.out, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        with _client(args) as client:
+            prepared = client.call("transfer.prepare", {"record_ids": args.records, "key_id": signer.key_id})
+            if prepared["namespace"] != NS_TRANSFER:
+                raise ValidationError("unexpected signing namespace")
+            print("Touch the YubiKey to sign transfer %s." % prepared["transfer_id"], file=sys.stderr)
+            signature = signer.sign_ns(NS_TRANSFER, bytes.fromhex(prepared["digest"]))
+            _print(client.call("transfer.write", {"transfer_id": prepared["transfer_id"],
+                                                  "signature": signature.decode("ascii")}, [out]))
+    finally:
+        os.close(out)
+    return 0
+
+
+def cmd_transfer_verify(args: argparse.Namespace) -> int:
+    fd = _open_ro(args.package)
+    try:
+        with _client(args) as client:
+            _print(client.call("transfer.verify", {"offset": 0}, [fd]))
+    finally:
+        os.close(fd)
+    return 0
+
+
+def cmd_transfer_release(args: argparse.Namespace) -> int:
+    fds = [_open_ro(args.package), _open_ro(args.dest, directory=True)]
+    try:
+        with _client(args) as client:
+            policy = "generate" if args.generate_names else "strict"
+            _print(call_as_owner(client, _signer(*args.auth), "transfer.release", {"name_policy": policy}, fds))
+    finally:
+        _close(fds)
+    return 0
+
+
+def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="guardian.py", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
-    b = sub.add_parser("broker", help="run the broker")
+
+    def command(name: str, func: Any, help_text: str, socket: bool = True) -> argparse.ArgumentParser:
+        p = sub.add_parser(name, help=help_text)
+        if socket:
+            p.add_argument("--socket", required=True)
+        p.set_defaults(func=func)
+        return p
+
+    b = command("broker", cmd_broker, "run the broker")
     b.add_argument("--policy", required=True)
-    b.add_argument("--socket", required=True)
+    b.add_argument("--state-dir", required=True)
+    b.add_argument("--instance-id", default="guardian-main")
     b.add_argument("--socket-mode", default="600")
     b.add_argument("--worker-user")
     b.add_argument("--log-file")
-    b.set_defaults(func=cmd_broker)
-    c = sub.add_parser("call", help="call a broker operation")
+    c = command("call", cmd_call, "call a broker operation")
     c.add_argument("op")
     c.add_argument("--params")
-    c.add_argument("--socket", required=True)
-    c.set_defaults(func=cmd_call)
+    c.add_argument("--auth", nargs=2, metavar=("KEY_PUB", "HANDLE"))
+    k = command("key-info", cmd_key_info, "show a public key's id and fingerprint", socket=False)
+    k.add_argument("pub")
+    t = command("trust-init", cmd_trust_init, "enroll the owner keys (genesis)")
+    t.add_argument("--owner", nargs=3, action="append", required=True, metavar=("KEY_PUB", "HANDLE", "LABEL"))
+    t = command("trust-enroll", cmd_trust_enroll, "enroll a replacement key")
+    t.add_argument("--new", nargs=3, required=True, metavar=("KEY_PUB", "HANDLE", "LABEL"))
+    t.add_argument("--auth", nargs=2, required=True, metavar=("KEY_PUB", "HANDLE"))
+    t = command("trust-revoke", cmd_trust_revoke, "revoke a lost or retired key")
+    t.add_argument("--subject", required=True)
+    t.add_argument("--auth", nargs=2, required=True, metavar=("KEY_PUB", "HANDLE"))
+    t.add_argument("--reason", default="")
+    command("trust-status", cmd_trust_status, "show enrolled keys")
+    i = command("intake", cmd_intake, "take files into custody")
+    i.add_argument("--auth", nargs=2, required=True, metavar=("KEY_PUB", "HANDLE"))
+    i.add_argument("files", nargs="+")
+    w = command("transfer-write", cmd_transfer_write, "write a signed transfer package")
+    w.add_argument("--auth", nargs=2, required=True, metavar=("KEY_PUB", "HANDLE"))
+    w.add_argument("--out", required=True)
+    w.add_argument("records", nargs="+")
+    v = command("transfer-verify", cmd_transfer_verify, "verify a transfer package")
+    v.add_argument("package")
+    r = command("transfer-release", cmd_transfer_release, "verify and release a transfer package")
+    r.add_argument("--auth", nargs=2, required=True, metavar=("KEY_PUB", "HANDLE"))
+    r.add_argument("--generate-names", action="store_true")
+    r.add_argument("package")
+    r.add_argument("dest")
+
     args = parser.parse_args(argv)
     try:
         return args.func(args)

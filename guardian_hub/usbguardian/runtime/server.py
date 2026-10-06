@@ -24,6 +24,7 @@ from ..common.text import display_text
 from . import ipc
 from .authz import Policy
 from .broker import Broker
+from .session import Session
 
 _PEERCRED = struct.Struct("iII")
 
@@ -135,9 +136,10 @@ class BrokerServer:
                                timeout=5)
                 return
             log_event(self.logger, logging.INFO, "server.connected", principal=principal.name, uid=uid, pid=pid)
+            session = Session(uid, gid, pid)
             while not self._stop.is_set():
                 try:
-                    message = ipc.recv_frame(fd, timeout=self.idle_timeout, allow_eof=True)
+                    message, fds = ipc.recv_frame_fds(conn, timeout=self.idle_timeout, allow_eof=True)
                 except OperationTimeout:
                     return
                 except GuardianError as exc:
@@ -147,7 +149,12 @@ class BrokerServer:
                     return
                 if message is None:
                     return
-                ipc.send_frame(fd, self.broker.handle(principal, message), timeout=self.idle_timeout)
+                session.fds = fds
+                try:
+                    response = self.broker.handle(principal, message, session)
+                finally:
+                    session.close_fds()  # anything the operation did not take
+                ipc.send_frame(fd, response, timeout=self.idle_timeout)
         except Exception as exc:
             err = as_guardian_error(exc)
             log_event(self.logger, logging.WARNING, "server.connection_error", code=err.code)

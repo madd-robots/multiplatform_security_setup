@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import os
 import select
+import socket
 import struct
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..common.canonical import canonical_dumps, canonical_loads
 from ..common.errors import (ConfigError, GuardianError, OperationTimeout, ProtocolError,
@@ -30,6 +31,10 @@ MAX_FRAME = 1024 * 1024
 HEADER = struct.Struct(">I")
 REQUEST_ID_PATTERN = r"[A-Za-z0-9_-]{1,64}"
 OP_PATTERN = r"[a-z][a-z0-9_]{0,31}(\.[a-z][a-z0-9_]{0,31}){1,3}"
+# File descriptors (SCM_RIGHTS) a client may pass with one request, e.g. a
+# file to take into custody. The broker uses them with the access the
+# client opened them with, and never opens client-supplied paths itself.
+MAX_FDS = 16
 
 REQUEST_SPEC = S.Obj({
     "v": S.Const(PROTOCOL_VERSION),
@@ -37,7 +42,8 @@ REQUEST_SPEC = S.Obj({
     "id": S.Str(pattern=REQUEST_ID_PATTERN, max_len=64),
     "op": S.Str(pattern=OP_PATTERN, max_len=130),
     "params": S.Obj({}, allow_extra=True),
-})
+    "fds": S.Int(min_value=1, max_value=MAX_FDS),
+}, optional=["fds"])
 
 ERROR_SPEC = S.Obj({
     "code": S.Str(pattern=r"[A-Z][A-Z0-9_]{2,63}", max_len=64),
@@ -139,9 +145,69 @@ def recv_frame(fd: int, *, timeout: Optional[float] = None, max_frame: int = MAX
     return decode_payload(payload)
 
 
-def make_request(request_id: str, op: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    return S.validate(REQUEST_SPEC, {"v": PROTOCOL_VERSION, "type": "request", "id": request_id,
-                                     "op": op, "params": params})
+def make_request(request_id: str, op: str, params: Dict[str, Any], fds: int = 0) -> Dict[str, Any]:
+    request = {"v": PROTOCOL_VERSION, "type": "request", "id": request_id, "op": op, "params": params}
+    if fds:
+        request["fds"] = fds
+    return S.validate(REQUEST_SPEC, request)
+
+
+def _close_all(fds: List[int]) -> None:
+    for fd in fds:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def recv_frame_fds(sock: socket.socket, *, timeout: Optional[float] = None, max_frame: int = MAX_FRAME,
+                   allow_eof: bool = False) -> Tuple[Any, List[int]]:
+    """Read one frame plus any descriptors sent with its first bytes.
+
+    Returns (None, []) on clean EOF when ``allow_eof``. Received descriptors
+    are closed on every error path, so a malformed request cannot leak them.
+    """
+    deadline = None if timeout is None else time.monotonic() + timeout
+    fd = sock.fileno()
+    _wait(fd, False, deadline)
+    try:
+        head, fds, flags, _ = socket.recv_fds(sock, HEADER.size, MAX_FDS)
+    except ConnectionResetError:
+        head, fds, flags = b"", [], 0
+    try:
+        if flags & socket.MSG_CTRUNC:
+            raise ProtocolError("too many file descriptors in one request")
+        if not head:
+            if allow_eof and not fds:
+                return None, []
+            raise ProtocolError("peer closed the connection mid-frame")
+        rest = _read_exact(fd, HEADER.size - len(head), deadline, False) if len(head) < HEADER.size else b""
+        (length,) = HEADER.unpack(head + (rest or b""))
+        if length == 0 or length > max_frame:
+            raise ProtocolError("frame length %d outside 1..%d" % (length, max_frame))
+        payload = _read_exact(fd, length, deadline, False)
+        assert payload is not None
+        return decode_payload(payload), list(fds)
+    except BaseException:
+        _close_all(list(fds))
+        raise
+
+
+def send_frame_fds(sock: socket.socket, message: Any, fds: Sequence[int], *,
+                   timeout: Optional[float] = None) -> None:
+    if not fds:
+        send_frame(sock.fileno(), message, timeout=timeout)
+        return
+    if len(fds) > MAX_FDS:
+        raise ValidationError("too many file descriptors")
+    data = encode_frame(message)
+    deadline = None if timeout is None else time.monotonic() + timeout
+    _wait(sock.fileno(), True, deadline)
+    sent = socket.send_fds(sock, [data], list(fds))
+    view = memoryview(data)[sent:]
+    while view:
+        _wait(sock.fileno(), True, deadline)
+        view = view[os.write(sock.fileno(), view):]
 
 
 def ok_response(request_id: str, result: Any) -> Dict[str, Any]:

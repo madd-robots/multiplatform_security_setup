@@ -6,7 +6,7 @@ from __future__ import annotations
 import secrets
 import socket
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 from ..common.errors import ProtocolError, error_from_wire
 from . import ipc
@@ -42,13 +42,14 @@ class BrokerClient:
             self._sock.close()
             self._sock = None
 
-    def call(self, op: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    def call(self, op: str, params: Optional[Dict[str, Any]] = None, fds: Sequence[int] = ()) -> Any:
         if self._sock is None:
             self.connect()
         assert self._sock is not None
         request_id = secrets.token_hex(8)
         fd = self._sock.fileno()
-        ipc.send_frame(fd, ipc.make_request(request_id, op, params or {}), timeout=self.timeout)
+        ipc.send_frame_fds(self._sock, ipc.make_request(request_id, op, params or {}, len(fds)), fds,
+                           timeout=self.timeout)
         message = ipc.recv_frame(fd, timeout=self.timeout, allow_eof=True)
         if message is None:
             raise ProtocolError("broker closed the connection")

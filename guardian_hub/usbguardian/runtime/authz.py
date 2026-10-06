@@ -15,9 +15,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, FrozenSet, Iterable, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, Optional, Tuple
 
-from ..common.canonical import canonical_loads
+from ..common.canonical import canonical_digest, canonical_loads
 from ..common.errors import ConfigError, GuardianError, PermissionDenied
 from ..common.fsutil import check_trusted_file, read_file_bounded
 from . import schema as S
@@ -39,6 +39,10 @@ CAPABILITIES: Dict[str, Capability] = {c.name: c for c in (
     Capability("runtime.diagnostics", "run sandbox self-tests"),
     Capability("device.inspect", "read-only device analysis"),
     Capability("audit.read", "read the audit ledger"),
+    Capability("auth.assert", "request owner challenges and present YubiKey assertions"),
+    Capability("trust.read", "read enrolled owner keys and the trust anchor"),
+    Capability("vault.prepare", "prepare a transfer manifest for signing"),
+    Capability("vault.verify", "verify a transfer package without releasing it"),
     Capability("device.modify", "erase, partition or format a device", frozenset({FACTOR_OWNER_KEY})),
     Capability("vault.read", "decrypt vault contents", frozenset({FACTOR_OWNER_KEY})),
     Capability("vault.write", "encrypt into or change a vault", frozenset({FACTOR_OWNER_KEY})),
@@ -116,6 +120,14 @@ class Decision:
     allowed: bool
     capability: str
     reason: str
+
+
+REQUEST_DOMAIN = "guardian/owner-request/v1"
+
+
+def request_digest(op: str, params: Dict[str, Any]) -> str:
+    """Digest of one exact request; an owner assertion is bound to it."""
+    return canonical_digest(REQUEST_DOMAIN, {"op": op, "params": params}).hex()
 
 
 def decide(principal: Principal, capability: str) -> Decision:
