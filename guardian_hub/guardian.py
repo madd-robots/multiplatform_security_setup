@@ -54,6 +54,18 @@ Install on Debian/MX (root, from the Rescue USB):
                                --owner-uid UID --worker-user usbguardian-worker
                                [--platform debian-mx|rescue-usb] [--enable-service] [--replace-policy] [--dry-run]
 
+Installer v2 (SysVinit only; offline bundle; plan first, then a narrow privileged apply):
+    guardian.py preflight                                          read-only SysVinit preflight
+    guardian.py inventory                                          dependencies derived from the code, and their state
+    guardian.py bundle-build --deployment PKG --trust-log trust.log --trust-anchor trust.anchor --debs DIR
+                             --distribution mx --release 23 --debian 12 --arch amd64 --auth KEY.pub HANDLE --out DIR
+    guardian.py install-plan  --bundle DIR --owner-uid UID [--worker-user NAME] [--enable-service]
+                              [--expect-anchor HEX]                (no root needed)
+    guardian.py install-apply --bundle DIR --owner-uid UID [--worker-user NAME] [--enable-service]
+                              [--expect-anchor HEX] --confirm PLAN_ID   (root)
+    guardian.py install-validate [--post-reboot] [--exercise-service]
+    guardian.py uninstall-guardian --yes                           (root; keeps state, keys, data and config)
+
 Audit ledger:
     guardian.py audit-status     --socket S
     guardian.py audit-verify     --socket S
@@ -448,6 +460,86 @@ def cmd_watchdog_resume(args: argparse.Namespace) -> int:
     return 0
 
 
+def _installer_sig_check(args: argparse.Namespace) -> Any:
+    from usbguardian.identity.handlers import WorkerSigCheck
+    from usbguardian.identity.sshsig import tool_verify
+    if os.geteuid() != 0:
+        return tool_verify  # phase 1 runs as the invoking user; nothing privileged happens
+    entry = pwd.getpwnam(args.worker_user) if args.worker_user else pwd.getpwnam("nobody")
+    return WorkerSigCheck(WorkerLauncher(worker_uid=entry.pw_uid, worker_gid=entry.pw_gid))
+
+
+def cmd_preflight(args: argparse.Namespace) -> int:
+    from usbguardian.deploy.preflight import sysvinit_preflight
+    report = sysvinit_preflight()
+    _print(report)
+    return 0 if report["result"] in ("PASS", "PASS WITH FINDINGS") else 3
+
+
+def cmd_inventory(args: argparse.Namespace) -> int:
+    from usbguardian.deploy.inventory import inventory, package_state
+    rows = inventory()
+    states = package_state([r["package"] for r in rows if not r["package"].startswith("(")])
+    _print([dict(r, state=states.get(r["package"])) for r in rows])
+    return 0
+
+
+def cmd_bundle_build(args: argparse.Namespace) -> int:
+    import time as _time
+    from usbguardian.deploy.bundle import build_bundle
+    from usbguardian.identity.sshsig import tool_verify
+    signer = _signer(*args.auth)
+    print("Touch the YubiKey to sign the bundle manifest.", file=sys.stderr)
+    manifest = build_bundle(Path(args.out), deployment=Path(args.deployment), trust_log=Path(args.trust_log),
+                            anchor_file=Path(args.trust_anchor), debs_dir=Path(args.debs) if args.debs else None,
+                            target={"distribution": args.distribution, "release": args.release,
+                                    "debian": args.debian, "architecture": args.arch},
+                            signer=signer, sig_check=tool_verify,
+                            created=_time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()))
+    _print({"target": manifest["target"], "deployment": manifest["deployment"],
+            "packages": len(manifest["packages"]), "files": len(manifest["files"])})
+    return 0
+
+
+def _plan_args(args: argparse.Namespace) -> Any:
+    return dict(owner_uid=args.owner_uid, worker_user=args.worker_user, enable_service=args.enable_service,
+                sig_check=_installer_sig_check(args), expected_anchor=args.expect_anchor)
+
+
+def cmd_install_plan(args: argparse.Namespace) -> int:
+    from usbguardian.deploy.installer import plan_install
+    plan = plan_install(Path(args.bundle), **_plan_args(args))
+    plan.pop("preflight")
+    _print(plan)
+    print("Compare the trust anchor with Guardian Main before applying. To apply: install-apply ... --confirm %s"
+          % plan["plan_id"], file=sys.stderr)
+    return 0 if plan["status"] == "READY" else 3
+
+
+def cmd_install_apply(args: argparse.Namespace) -> int:
+    from usbguardian.deploy.installer import apply_install
+    report = apply_install(Path(args.bundle), confirm=args.confirm, **_plan_args(args))
+    report.pop("plan")
+    _print(report)
+    print("Nothing was rebooted. After an intentional reboot run: install-validate --post-reboot", file=sys.stderr)
+    return 0 if report["validation"]["result"] == "PASS" else 3
+
+
+def cmd_install_validate(args: argparse.Namespace) -> int:
+    from usbguardian.deploy.installer import validate_install
+    report = validate_install(post_reboot=args.post_reboot, exercise_service=args.exercise_service)
+    _print(report)
+    return 0 if report["result"] == "PASS" else 3
+
+
+def cmd_uninstall(args: argparse.Namespace) -> int:
+    from usbguardian.deploy.installer import uninstall
+    if not args.yes:
+        raise ValidationError("uninstall removes Guardian's code and service; pass --yes to confirm")
+    _print(uninstall())
+    return 0
+
+
 def cmd_install_debian(args: argparse.Namespace) -> int:
     from usbguardian.deploy.debian import install_debian
     from usbguardian.identity.handlers import WorkerSigCheck
@@ -599,6 +691,34 @@ def main(argv: Optional[List[str]] = None) -> int:
     command("audit-verify", cmd_audit_verify, "verify the audit chain and signed checkpoints")
     a = command("audit-checkpoint", cmd_audit_checkpoint, "sign a checkpoint of the audit ledger head")
     a.add_argument("--auth", nargs=2, required=True, metavar=("KEY_PUB", "HANDLE"))
+    command("preflight", cmd_preflight, "read-only SysVinit preflight", socket=False)
+    command("inventory", cmd_inventory, "dependency inventory and package state", socket=False)
+    g = command("bundle-build", cmd_bundle_build, "build and sign an offline installation bundle", socket=False)
+    g.add_argument("--deployment", required=True)
+    g.add_argument("--trust-log", required=True)
+    g.add_argument("--trust-anchor", required=True)
+    g.add_argument("--debs")
+    g.add_argument("--distribution", required=True)
+    g.add_argument("--release", required=True)
+    g.add_argument("--debian", required=True)
+    g.add_argument("--arch", required=True)
+    g.add_argument("--auth", nargs=2, required=True, metavar=("KEY_PUB", "HANDLE"))
+    g.add_argument("--out", required=True)
+    for name, func, text in (("install-plan", cmd_install_plan, "phase 1: verify the bundle and show the plan"),
+                             ("install-apply", cmd_install_apply, "phase 2 (root): apply a confirmed plan")):
+        g = command(name, func, text, socket=False)
+        g.add_argument("--bundle", required=True)
+        g.add_argument("--owner-uid", type=int, required=True)
+        g.add_argument("--worker-user", default="usbguardian-worker")
+        g.add_argument("--enable-service", action="store_true")
+        g.add_argument("--expect-anchor")
+        if name == "install-apply":
+            g.add_argument("--confirm", required=True)
+    g = command("install-validate", cmd_install_validate, "post-install / post-reboot validation", socket=False)
+    g.add_argument("--post-reboot", action="store_true")
+    g.add_argument("--exercise-service", action="store_true", help="start/status/restart/stop Guardian's service")
+    g = command("uninstall-guardian", cmd_uninstall, "remove Guardian's code and service", socket=False)
+    g.add_argument("--yes", action="store_true")
     d = command("install-debian", cmd_install_debian, "install a verified deployment on Debian/MX", socket=False)
     d.add_argument("--package", required=True)
     d.add_argument("--trust-log", required=True)

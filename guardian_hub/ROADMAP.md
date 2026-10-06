@@ -398,7 +398,9 @@ ACTIVE`. A read-only SysVinit preflight runs before any change:
 
 Results are PASS, PASS WITH FINDINGS, BLOCKED or UNKNOWN. UNKNOWN never
 counts as PASS. dpkg checks are integrity signals, not proof of a clean
-system.
+system. *Implemented in `deploy/preflight.py`; validated here against
+fixtures and this development container (which correctly reports
+ENVIRONMENT MISMATCH, since its PID 1 is not SysVinit).*
 
 **D10 (settled 2026-10-06). USB Airlock inside Guardian.** The flow is RED
 USB → read-only acquisition → quarantine → inspection (type, static script
@@ -434,6 +436,19 @@ manifest is owner-signed. A bundle that doesn't match the target, or any
 file mismatch, blocks installation. A post-reboot validation command
 exists, and the installer never reboots.
 
+*Implemented (handoff H5, `usbguardian/deploy`):* `bundle.py` (namespace
+`guardian-bundle@v1`, closed-bundle check, target check), `installer.py`
+(plan with id, apply, VERIFY/REPAIR/UPDATE, worker account creation,
+`apt-get install --no-install-recommends --no-upgrade` of verified local
+packages only, update-rc.d registration, install record and report, audit
+entries, `validate_install` with `--post-reboot` and `--exercise-service`,
+uninstall that keeps state and configuration), `inventory.py` (derived from
+the code; a test fails if the code uses a tool the inventory lacks).
+Network-mode installation (package names from authenticated repositories
+instead of a bundle) is not implemented; the offline bundle is the
+supported path. Not yet run on the MX HP: service start/stop/restart,
+update-rc.d, reboot behaviour, real dpkg output.
+
 **Handoff integration plan (2026-10-06), in order:**
 1. tamper-evident audit ledger (hash chain, owner-signed checkpoints): **done**
 2. D5 leases (Main issuance and registry generations, spinoff lease state,
@@ -443,7 +458,8 @@ exists, and the installer never reboots.
    cannot be integrated as is.
 4. USB Airlock (D10): **done**
 5. SysVinit preflight, installer v2, uninstall, post-install and post-reboot
-   validation, offline bundle (D9, D11)
+   validation, offline bundle (D9, D11): **done** (`usbguardian/deploy`);
+   hardware validation on the MX HP pending
 6. `age` capsules behind the D7 hardware gate
 7. documentation
 

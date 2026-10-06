@@ -36,7 +36,9 @@ NS_DEPLOY = "guardian-deploy@v1"
 NS_AUDIT = "guardian-audit@v1"
 NS_LEASE = "guardian-lease@v1"
 NS_SPINOFF = "guardian-spinoff@v1"  # signed by a spinoff's own (non-owner) key
-NAMESPACES = frozenset({NS_OWNER, NS_TRANSFER, NS_TRUST, NS_ENROLL, NS_DEPLOY, NS_AUDIT, NS_LEASE, NS_SPINOFF})
+NS_BUNDLE = "guardian-bundle@v1"    # offline installation bundle manifests
+NAMESPACES = frozenset({NS_OWNER, NS_TRANSFER, NS_TRUST, NS_ENROLL, NS_DEPLOY, NS_AUDIT, NS_LEASE, NS_SPINOFF,
+                        NS_BUNDLE})
 SCHEME = "sshsig"
 MAX_SIGNATURE = 16 * 1024
 _BEGIN = b"-----BEGIN SSH SIGNATURE-----"

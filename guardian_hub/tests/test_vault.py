@@ -130,6 +130,15 @@ class CustodyTests(VaultCase):
             self.assertEqual(stat.S_IMODE(os.lstat(self.root / d).st_mode), 0o700)
         self.assertEqual(os.listdir(self.root / "store" / "tmp"), [])
 
+    def test_startup_sweep_removes_only_partial_intakes(self):
+        rec = self.store.intake_bytes(b"accepted", "kept.txt")
+        (self.root / "store" / "tmp" / "deadbeef").write_bytes(b"partial copy from a killed broker")
+        os.symlink("/etc/passwd", self.root / "store" / "tmp" / "planted")
+        self.assertEqual(self.store.sweep_tmp(), {"removed": 2, "bytes": 33})
+        self.assertEqual(os.listdir(self.root / "store" / "tmp"), [])
+        self.assertTrue(os.path.exists("/etc/passwd"))
+        self.store.verify_object(rec["sha256"], rec["length"])  # accepted objects are untouched
+
     def test_source_changes_after_intake_do_not_matter(self):
         (self.src / "a").write_bytes(b"original")
         rec = self.store.intake(self.src / "a", "a")

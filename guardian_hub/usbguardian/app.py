@@ -90,6 +90,9 @@ def build_services(launcher: WorkerLauncher, state_dir: Path, *, instance_id: st
     store = CustodyStore(state_dir / "custody", space_policy=space_policy)
     owner = OwnerAuthority(trust, check, instance_id)
     audit = AuditLedger(state_dir / "audit")
+    swept = store.sweep_tmp()
+    if swept["removed"]:
+        audit.append("custody.startup_cleanup", removed=swept["removed"], bytes=swept["bytes"])
     watchdog = PauseController(state_dir / "watchdog", adapter=watchdog_adapter, audit=audit)
     operations: List[Operation] = (
         list(default_operations()) + list(device_operations(launcher)) + list(owner.operations())

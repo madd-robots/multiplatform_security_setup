@@ -37,6 +37,7 @@ from ..identity.sshkeys import HARDWARE_KEY_TYPES
 from ..identity.sshsig import SigCheck
 from ..identity.trust import check_extension
 from ..runtime.workers import verify_code_tree
+from .preflight import MISMATCH, systemd_active
 
 SUPPORTED_PLATFORMS = ("debian-mx", "rescue-usb")
 SERVICE_NAME = "usbguardian"
@@ -178,9 +179,12 @@ block
 def install_debian(package: Path, trust_log: Path, anchor_file: Path, *, owner_uid: int, worker_user: str,
                    sig_check: SigCheck, layout: InstallLayout = InstallLayout(), platform: str = "debian-mx",
                    allowed_types: FrozenSet[str] = HARDWARE_KEY_TYPES, replace_policy: bool = False,
-                   enable_service: bool = False, dry_run: bool = False, python: Optional[str] = None) -> Dict[str, Any]:
+                   enable_service: bool = False, dry_run: bool = False, python: Optional[str] = None,
+                   proc_root: Path = Path("/proc"), fs_root: Path = Path("/")) -> Dict[str, Any]:
     if os.geteuid() != 0:
         raise SecurityViolation("the installer must run as root", code="NOT_ROOT")
+    if systemd_active(proc_root, fs_root):  # D9: never install a SysVinit service beside systemd
+        raise ConfigError(MISMATCH, code="ENVIRONMENT_MISMATCH")
     if platform not in SUPPORTED_PLATFORMS:
         raise ValidationError("this installer supports %s" % ", ".join(SUPPORTED_PLATFORMS))
     try:

@@ -28,7 +28,7 @@ from typing import Any, Dict, Optional, Union
 from ..common.canonical import canonical_dumps, canonical_loads
 from ..common.errors import (IntegrityError, NotFound, ResourceLimitExceeded, SecurityViolation,
                              ValidationError)
-from ..common.fsutil import atomic_write, ensure_private_dir, read_file_bounded, write_all
+from ..common.fsutil import atomic_write, ensure_private_dir, open_dir_nofollow, read_file_bounded, write_all
 from ..common.space import DEFAULT_POLICY, SpaceGuard, SpacePolicy
 from ..common.text import display_text
 from ..runtime import schema as S
@@ -104,6 +104,25 @@ class CustodyStore:
         ensure_private_dir(self.root)
         for sub in ("objects", "records", "tmp"):
             ensure_private_dir(self.root / sub)
+
+    def sweep_tmp(self) -> Dict[str, int]:
+        """Remove partial intakes left by a broker that was killed mid-write (call at startup only).
+
+        ``tmp/`` is private to the store and holds nothing but unfinished,
+        unverified copies; nothing in it was ever accepted into custody.
+        """
+        removed = freed = 0
+        dir_fd = open_dir_nofollow(self.root / "tmp")
+        try:
+            for name in os.listdir(dir_fd):
+                st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                if stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode):
+                    os.unlink(name, dir_fd=dir_fd)
+                    removed += 1
+                    freed += st.st_size if stat.S_ISREG(st.st_mode) else 0
+        finally:
+            os.close(dir_fd)
+        return {"removed": removed, "bytes": freed}
 
     def object_path(self, sha256: str) -> Path:
         if not isinstance(sha256, str) or not SHA256_RE.match(sha256):

@@ -68,7 +68,13 @@ guardian_hub/
     audit/                    tamper-evident audit ledger (handoff H1)
       ledger.py               hash-chained JSON-line segments, owner-signed checkpoints
       operations.py           audit.status / entries / verify / checkpoint
-    deploy/debian.py          Stage 7: install a verified deployment on Debian/MX (SysVinit)
+    deploy/                   Debian/MX installation (SysVinit only)
+      debian.py               Guardian's own files: verified release, policy, init script
+      preflight.py            read-only SysVinit preflight (PASS / PASS WITH FINDINGS / BLOCKED / UNKNOWN)
+      inventory.py            dependency inventory derived from the code, package state
+      bundle.py               owner-signed, target-specific, closed offline bundle
+      installer.py            installer v2: plan (unprivileged), apply (root), validate, uninstall
+      system.py               fixed-tool command runner, platform detection
     app.py                    assembles the broker from its services
     runtime/                  Stage 2 security runtime (Linux)
       ipc.py                  length-prefixed canonical frames, deadlines, size bounds
@@ -106,28 +112,40 @@ Lost key B: `trust-revoke --subject <B key_id> --auth guardian-key-a.pub guardia
 Then enroll its replacement through the remaining key with
 `trust-enroll --new NEW.pub NEW "Key C" --auth guardian-key-a.pub guardian-key-a`.
 
-## Installing on Debian/MX (from the Rescue USB)
+## Installing on Debian/MX (SysVinit only, offline)
 
-On Guardian Main, build a deployment (one touch), then copy it to the
-Rescue USB together with `trust.log` and `trust.anchor` from Main's state
-directory (`/var/lib/usbguardian/trust/`):
+On Guardian Main, build a deployment (one touch). On a machine of the
+exact target (for example MX 23, Debian 12, amd64) with normal,
+authenticated APT, download the packages the target lacks
+(`apt-get download clamav ...`, with their dependencies). Then build the
+offline bundle on Main (one touch; the key never leaves the YubiKey):
 
 ```
 python3 -I -B guardian.py forge-build --socket S --auth guardian-key-a.pub guardian-key-a \
     --instance-id desk --platform debian-mx --profile storage --out desk.gpkg
+python3 -I -B guardian.py bundle-build --deployment desk.gpkg --trust-log trust.log \
+    --trust-anchor trust.anchor --debs ./debs --distribution mx --release 23 --debian 12 --arch amd64 \
+    --auth guardian-key-a.pub guardian-key-a --out /media/rescue/desk-bundle
 ```
 
-On the target, as root, booted from the Rescue USB:
+On the target, booted from the Rescue USB:
 
 ```
-adduser --system --group --no-create-home --home /nonexistent --shell /usr/sbin/nologin usbguardian-worker
-python3 -I -B guardian.py install-debian --package desk.gpkg --trust-log trust.log \
-    --trust-anchor trust.anchor --owner-uid 1000 --worker-user usbguardian-worker --dry-run
-python3 -I -B guardian.py install-debian ... --enable-service
+python3 -I -B guardian.py preflight                       # read-only; stops on systemd
+python3 -I -B guardian.py install-plan --bundle desk-bundle --owner-uid 1000 --enable-service \
+    --expect-anchor <anchor shown by trust-status on Main>
+sudo python3 -I -B guardian.py install-apply --bundle desk-bundle --owner-uid 1000 --enable-service \
+    --expect-anchor <anchor> --confirm <plan id>
+# after an intentional reboot (the installer never reboots):
+sudo python3 -I -B guardian.py install-validate --post-reboot
 ```
 
-Before running the install, compare the anchor printed by the dry run
-with Guardian Main's (`trust-status`).
+The plan shows platform, init, preflight, mode (INSTALL, VERIFY, REPAIR,
+UPDATE), packages already satisfied and to install, and NONE for removals,
+broad upgrades, bootloader, init conversion and systemd. Running it again
+is safe. `uninstall-guardian --yes` removes Guardian's code and service and
+keeps state, keys, data and configuration. The older single-step
+`install-debian` remains for development.
 
 ## USB Airlock (D10)
 

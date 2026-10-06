@@ -164,6 +164,28 @@ and deployments were not altered. Secrecy comes second.
 - USB interface blocking at the kernel level is supplied as a reviewed
   suggestion, not applied, because applying it blindly can lock out input
   devices.
+- **SysVinit only (D9).** A read-only preflight checks PID 1, the init
+  package and version, the runlevel, the rc infrastructure and
+  `dpkg --verify` of the init packages. systemd (or any other init) as
+  PID 1 stops service installation with `ENVIRONMENT MISMATCH - SYSVINIT
+  NOT ACTIVE`; a changed critical init file is BLOCKING and reported, never
+  repaired; UNKNOWN never counts as PASS. dpkg checks compare against the
+  package database, which root could also alter: a signal, not proof.
+- **Installer v2 and the offline bundle (D11).** The bundle manifest is
+  signed by an owner key (`guardian-bundle@v1`) and lists the target and
+  every file with its hash; any difference, extra or missing file blocks
+  installation. A bundle for another target is refused. Phase 1 runs
+  without root and produces a plan with an id; phase 2 re-verifies
+  everything and runs only for that id. It installs only missing packages
+  from the verified bundle (`--no-upgrade`, never an OS upgrade, removal,
+  bootloader or init change, never an unauthenticated repository), never
+  overwrites another instance's identity, repairs only Guardian's own
+  files (keeping the damaged copy as evidence) and never reboots. Local
+  `.deb` files are authenticated by the signed manifest, not by APT.
+- A broker start removes partial custody intakes a killed broker left in
+  the store's private `tmp/` (recorded in the audit ledger). Leftovers on
+  destination media (`.guardian-staging-*`, an incomplete
+  `GUARDIAN-AIRLOCK-*` folder) are left for the owner to inspect.
 
 ## Audit ledger (handoff H1)
 
