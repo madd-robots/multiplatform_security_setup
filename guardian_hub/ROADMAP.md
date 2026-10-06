@@ -259,6 +259,28 @@ library or packaged in Debian/MX in a form that meets D2. Options: `age`
 with a FIDO2/PIV plugin, or python3-cryptography plus `fido2-tools`
 (hmac-secret). Waiting on the owner.
 
+**D8 (recorded 2026-10-06). Space-exhaustion watchdog integration.**
+The owner is having an external watchdog designed elsewhere. It detects
+attacks that fill writable space to slow or stop work. Requirements for
+integrating it:
+
+- **Contract:** watchdog → broker only, as alerts over the existing
+  socket. The watchdog runs as its own account with a policy entry
+  granting one new capability (`watchdog.report`, no owner factor).
+  Alerts are strictly validated canonical JSON.
+- **Alerts can only restrict.** An alert can pause intake, transfer
+  writes, releases and device preparation. It can never trigger deletion,
+  grant capabilities, satisfy `owner_key`, or bypass verification.
+  Resuming is an owner operation (touch).
+- **Guardian-side gap to close regardless:** check free space (statvfs)
+  with a kept-back reserve before intake into the custody store, package
+  writes and release staging. Today those fail mid-way on a full disk. Data
+  stays safe (everything is staged and verified), but they should refuse
+  up front with a clear error.
+- **Review first.** The watchdog's code is externally produced and must be
+  reviewed against this security model before integration. Waiting on its
+  interface: what it monitors, its alert format, and any autonomous actions.
+
 **D6. Custody integrity: Guardian attests custody, not provenance.**
 *(Settled 2026-10-05.)*
 Guardian is responsible for data only from the moment it accepts it. It
