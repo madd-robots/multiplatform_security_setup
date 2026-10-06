@@ -6,7 +6,7 @@ Windows. The full plan, stage status and the design changes made along the way
 are in [ROADMAP.md](ROADMAP.md). Read [SECURITY_MODEL.md](SECURITY_MODEL.md)
 for what the code guarantees today and what it does not.
 
-**Status: Stages 1–3 of 9 are implemented.** The owner decisions in ROADMAP.md (integrity-first threat model, touch-only YubiKeys, dedicated drives) govern the remaining stages. There is no device analysis,
+**Status: Stages 1–4 of 9 are implemented.** The owner decisions in ROADMAP.md (integrity-first threat model, touch-only YubiKeys, dedicated drives) govern the remaining stages. There is no device analysis,
 encryption or YubiKey support yet. Each of those is a later stage, and the
 operations that need them are refused by design until they exist.
 
@@ -30,6 +30,11 @@ guardian_hub/
       surface.py              DESTRUCTIVE keyed full-surface write + O_DIRECT read-back
       handlers.py             worker handlers devices.scan / devices.inspect
       operations.py           broker ops device.list / device.inspect / device.surface_test
+    vault/                    Stage 4 integrity vault (custody, ROADMAP D6)
+      custody.py              private content-addressed custody store, intake with read-back
+      package.py              transfer package v1: write, read-back, verify (fail closed)
+      release.py              verify-then-release via staging, no overwrite, name policy
+      auth.py                 signer/verifier interface (YubiKey implementation: Stage 5)
     runtime/                  Stage 2 security runtime (Linux)
       ipc.py                  length-prefixed canonical frames, deadlines, size bounds
       schema.py               strict validators for every message and parameter
@@ -128,5 +133,14 @@ mode. The suite covers:
   topology disagreement and identity change mid-test, and for owner-key
   gating through the broker. Read-only scans also run in the real sandboxed
   worker.
+- **Stage 4:** byte-exact round trips for CRLF, BOM, invalid UTF-8, NUL,
+  empty, EICAR and PE-header payloads (never altered). A flipped byte in any
+  package region is rejected, and so is an attacker who rewrites the
+  payload, digests and trailer but lacks the owner key. Also covered:
+  key-id/sender binding, non-canonical manifests, truncation, trailing data,
+  swapped objects, oversized headers, the missing verifier, store and record
+  tampering, read-back of a corrupted or different medium, raw-device
+  offsets, release name policies, no-overwrite release and cleanup after a
+  late failure. Signatures in these tests use a test-only HMAC verifier.
 - **Hygiene:** no `shell=True`, `eval`, `exec`, `pickle`, dynamic imports or
   unbounded reads; ASCII-only, licensed, stdlib-only sources.

@@ -10,8 +10,8 @@ records where the implementation deviates from it and why.
 | 1 Foundation | common library, errors, canonical serialization, safe filenames, logging, tests | **Done** (`usbguardian/common`) |
 | 2 Security runtime | privilege separation, broker, worker isolation, IPC, authorization | **Done**, with the hardening listed below still open (`usbguardian/runtime`) |
 | 3 Device engine | USB detection, storage identity, vendor and controller data, capacity verification | **Done** (`usbguardian/devices`); see notes below |
-| 4 Integrity vault (D1, D6) | custody object store, transfer package format, read-back verification, optional encryption, key management, rotation, locking | Not started |
-| 5 YubiKey integration | enrollment, authentication, owner verification | Not started |
+| 4 Integrity vault (D1, D6) | custody object store, transfer package format, read-back verification, verify-then-release | **Done** (`usbguardian/vault`); see notes below |
+| 5 YubiKey integration | enrollment, authentication, owner verification; manifest signer/verifier, revocation (D3); optional encryption, key management, rotation, locking (moved from Stage 4); broker vault/transfer operations with fd passing | Not started |
 | 6 Guardian Forge | spinoff packages, signing, encryption | Not started |
 | 7 Platforms | Debian/MX, then Termux, then Windows | Not started |
 | 8 Device assurance | firmware and artifact verification, erase verification, reports | Not started |
@@ -58,13 +58,52 @@ before anything can rely on it, and none was claimed as done.
   - the surface test runs in the broker's connection thread and is not
     cancelled if the client disconnects; Stage 9 adds progress reporting
 
-### Next: Stage 4
+### Stage 4 notes
 
-Integrity vault and custody store (D1, D6): content-addressed custody
-objects (streamed SHA-256 plus exact length), the canonical custody
-manifest, the transfer package format with USB read-back, the receiving-side
-verify-then-release path, and the drive layout and whole-volume
-verification (D4 steps 3–5). Manifest signing plugs in at Stage 5.
+- **Custody store:** one streaming pass both writes and hashes, so the
+  stored copy is exactly the hashed bytes. The copy is read back from disk
+  before it is accepted. Objects are content-addressed and read-only.
+  Records are canonical, and loading a record re-verifies its object.
+  Source names are kept as data, losslessly.
+- **Package v1** (`vault/package.py`): a prelude, a canonical manifest that
+  binds each object's SHA-256 and exact length, the format version,
+  transfer id, creation time and sender instance and key, then a signature
+  block, the unmodified payload, and a trailer. The writer re-checks every
+  object against its intake identity while streaming. It writes the trailer
+  last, so a failed or interrupted write never verifies.
+- **Verification** fails closed at the first problem. The signature is
+  checked before any payload byte is read. A missing verifier is an error;
+  there is no unauthenticated mode.
+- **Read-back** drops cached pages, re-verifies the medium against the
+  intake identities, and compares the result with what was written.
+- **Release** stages inside the destination and publishes only after the
+  whole package has verified, using a no-overwrite link (with a rename
+  fallback on FAT). Unsafe or duplicate names are refused, or with
+  `generate` replaced by Guardian names, while the receipt keeps the
+  original. Bytes are never changed.
+- **Deferred, with reasons** (no change to the stage order otherwise):
+  - **Encryption, key management, rotation and locking** need key material
+    that D2 says may only come from the YubiKeys, so they move to Stage 5.
+    Integrity never depends on them (D1).
+  - **Broker operations for intake, build and release** move to Stage 5.
+    They need `owner_key`, and the client must pass open file descriptors
+    (SCM_RIGHTS) so the root broker never opens client-supplied paths. Package
+    parsing on the receiving side will run in a worker that receives the
+    fd.
+  - **Drive layout** (D4 steps 3–5): the package is medium-independent and
+    works at offset 0 of a raw device or as a file. Raw layout, with no
+    filesystem for the OS to automount or parse, suits Linux and Windows.
+    Termux cannot open raw devices, so the layout choice per platform and
+    the whole-volume check for a filesystem layout belong to Stage 7.
+
+### Next: Stage 5
+
+YubiKey integration under D2/D3: enrollment of both keys by fresh
+cryptographic proof, touch-gated signing of manifests (signer/verifier for
+`vault/auth.py`), revocation and replacement signed by the remaining key,
+the `owner_key` factor for the broker, fd passing on the broker socket,
+the vault/transfer operations, and optional encryption with YubiKey-wrapped
+keys.
 
 ## Owner decisions (2026-10-05)
 

@@ -1,4 +1,4 @@
-# Security model (Stages 1 to 3)
+# Security model (Stages 1 to 4)
 
 ## Threat model (owner decision D1, see ROADMAP.md)
 
@@ -91,6 +91,32 @@ and deployments were not altered. Secrecy comes second.
 - The surface test proves the logical address space was overwritten and
   read back correctly. It cannot reach controller firmware or spare flash
   (ROADMAP D4).
+
+## Integrity vault (Stage 4, ROADMAP D6)
+
+- Guardian attests **custody, not provenance**. It makes no claim that
+  incoming data was correct or safe. It guarantees that the receiving
+  Guardian releases exactly the bytes the sending Guardian accepted.
+- Payload bytes are opaque. They are never normalized, converted or
+  sanitized. Malicious content is carried unchanged, because analysing it is
+  a separate job.
+- Every release is authenticated: the manifest signature binds each
+  object's SHA-256 and exact length. An attacker who rewrites the medium
+  can recompute every hash, but cannot produce the signature without an
+  enrolled key. The signature is checked before any payload byte is read,
+  so an unauthenticated package cannot make Guardian write anything.
+- Until Stage 5 there is no production verifier, so **nothing can be
+  released**. That is intended (fail closed).
+- Release never overwrites. Nothing appears under a final name before the
+  whole package has verified, and a failure leaves the destination
+  unchanged. File names are the only thing that can differ from the
+  source, and only under the `generate` policy, with the original kept in
+  the receipt.
+- Limit: the custody store and the receiving staging area trust the local
+  filesystem of the Guardian host while the transfer runs. Integrity across
+  the USB transport is cryptographic; integrity on a compromised host
+  during processing is bounded by the D1 rules (known-good boot, second
+  instance).
 
 ## Known limitations (not hidden, not yet fixed)
 
