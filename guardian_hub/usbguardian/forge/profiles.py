@@ -26,8 +26,9 @@ PROFILES: Dict[str, FrozenSet[str]] = {
     "full": frozenset(set(CAPABILITIES) - FORGE_ONLY),
     "recovery": frozenset(_BASE | {"runtime.diagnostics", "device.inspect", "device.modify", "vault.verify",
                                    "vault.read", "keys.manage"}),
-    "storage": frozenset(_BASE | {"vault.prepare", "vault.verify", "vault.read", "vault.write", "keys.manage"}),
-    "diagnostic": frozenset(_BASE | {"runtime.diagnostics", "device.inspect", "vault.verify"}),
+    "storage": frozenset(_BASE | {"vault.prepare", "vault.verify", "vault.read", "vault.write", "keys.manage",
+                                  "device.inspect", "airlock.read", "airlock.acquire", "airlock.export"}),
+    "diagnostic": frozenset(_BASE | {"runtime.diagnostics", "device.inspect", "vault.verify", "airlock.read"}),
 }
 
 for _name, _caps in PROFILES.items():

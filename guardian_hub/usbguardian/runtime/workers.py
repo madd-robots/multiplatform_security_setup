@@ -9,6 +9,7 @@ limit, produced before the wall-clock deadline, by a process that exits 0.
 
 from __future__ import annotations
 
+import fcntl
 import logging
 import os
 import selectors
@@ -113,15 +114,25 @@ class WorkerLauncher:
             allow_subprocess=profile.allow_subprocess, run_as_uid=self.worker_uid, run_as_gid=self.worker_gid,
             io_timeout=max(1, int(profile.wall_timeout)), test_handlers=self.enable_test_handlers)
 
-    def run(self, profile: WorkerProfile, handler: str, params: Dict[str, Any]) -> Any:
+    def run(self, profile: WorkerProfile, handler: str, params: Dict[str, Any], *,
+            fds: Tuple[int, ...] = ()) -> Any:
+        """Run one job.  ``fds`` are inherited by the worker under the same numbers.
+
+        Pass only descriptors opened read-only for exactly the data the job
+        needs (for example quarantined files); the handler's parameters
+        name them.
+        """
+        for fd in fds:
+            if not isinstance(fd, int) or fd < 3 or fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDONLY:
+                raise ValueError("workers receive only read-only descriptors")
         sandbox_doc = canonical_dumps(self._sandbox_profile(profile).to_document()).decode("utf-8")
         request = ipc.encode_frame({"handler": handler, "params": params})
         argv = [self.python, "-I", "-B", "-S", str(WORKER_ENTRY), sandbox_doc]
         started = time.monotonic()
         try:
             proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    env=dict(WORKER_ENV), cwd="/", close_fds=True, start_new_session=True,
-                                    shell=False)
+                                    env=dict(WORKER_ENV), cwd="/", close_fds=True, pass_fds=tuple(fds),
+                                    start_new_session=True, shell=False)
         except OSError as exc:
             raise WorkerFailure("worker could not be started: %s" % exc.strerror) from None
         try:

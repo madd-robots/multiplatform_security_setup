@@ -32,12 +32,14 @@ EXIT_IO_FAILED = 71
 
 
 def _registry(test_handlers: bool) -> Dict[str, Any]:
+    from ..airlock.handlers import AIRLOCK_REGISTRY
     from ..devices.handlers import DEVICE_REGISTRY
     from ..identity.handlers import IDENTITY_REGISTRY
     from .handlers import REGISTRY
     registry = dict(REGISTRY)
     registry.update(DEVICE_REGISTRY)
     registry.update(IDENTITY_REGISTRY)
+    registry.update(AIRLOCK_REGISTRY)
     if test_handlers:
         from .testing_handlers import TEST_REGISTRY
         registry.update(TEST_REGISTRY)

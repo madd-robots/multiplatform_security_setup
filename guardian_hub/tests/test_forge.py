@@ -41,7 +41,7 @@ class ProfileTests(unittest.TestCase):
             self.assertIn("auth.assert", caps, name)
         self.assertEqual(PR.profile_capabilities("diagnostic"),
                          sorted({"runtime.status", "auth.assert", "trust.read", "runtime.diagnostics",
-                                 "device.inspect", "vault.verify", "lease.read", "lease.manage"}))
+                                 "device.inspect", "vault.verify", "lease.read", "lease.manage", "airlock.read"}))
 
     def test_unavailable_platforms_refused(self):
         PR.check_platform("debian-mx")

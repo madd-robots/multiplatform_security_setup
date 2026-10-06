@@ -54,5 +54,16 @@ class HygieneTests(unittest.TestCase):
                 self.assertIn(name, stdlib, "%s imports non-stdlib %s" % (path.relative_to(ROOT), name))
 
 
+    def test_generated_shell_has_no_backticks(self):
+        # Backtick rule (owner handoff): Guardian's own shell code uses no legacy command substitution.
+        sys.path.insert(0, str(ROOT))
+        from usbguardian.deploy.debian import USBGUARD_SUGGESTION, InstallLayout, init_script
+        script = init_script(InstallLayout(), python="/usr/bin/python3", worker_user="usbguardian-worker",
+                             instance_id="desk")
+        for text in (script, USBGUARD_SUGGESTION):
+            self.assertNotIn(chr(0x60), text)
+        self.assertNotIn("eval ", script)
+
+
 if __name__ == "__main__":
     unittest.main()

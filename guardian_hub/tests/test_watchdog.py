@@ -105,8 +105,8 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual(self.surface_code(svc), "WATCHDOG_PAUSED")
         paused_ops = sorted(op.name for op in svc.broker.operations.values()
                             if op.pause_class is not None and op.pause_class in out["paused"])
-        self.assertEqual(paused_ops, ["device.surface_test", "forge.write", "transfer.release",
-                                      "transfer.write", "vault.intake"])
+        self.assertEqual(paused_ops, ["airlock.acquire", "airlock.export", "device.surface_test", "forge.write",
+                                      "transfer.release", "transfer.write", "vault.intake"])
         for op in svc.broker.operations.values():
             if op.pause_class is None:
                 svc.watchdog.check(op)  # verification, status, trust, lease, audit: never paused

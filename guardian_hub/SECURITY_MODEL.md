@@ -205,6 +205,41 @@ and deployments were not altered. Secrecy comes second.
   is detected while the audit ledger is intact; deleting both is not. A
   wrong system clock that runs *ahead* only shortens a lease.
 
+## USB Airlock (ROADMAP D10, handoff H4)
+
+- RED media is hostile. Its identity (USB descriptors, interfaces) and its
+  layout (partition table, ESP, boot flags, boot code, overlaps, GPT
+  checksums) are inspected in sandboxed workers before anything mounts
+  it. Storage that also presents HID, network or other unexpected
+  interfaces is BLOCKED; unusual layouts need review; nothing is repaired.
+- Acquisition needs an owner touch, re-checks the device identity before
+  mounting and after unmounting, and mounts one volume `ro,noexec,nodev,
+  nosuid` (ext: `noload`, so no journal replay). The walk never follows
+  symlinks, skips special files and system folders, and bounds entries,
+  depth, file size and total size. Quarantine copies get generated names,
+  no execute bits, and are checked against the space reserve.
+- Each file is inspected without execution: type from content (extension
+  mismatches flagged), static review of shell and PowerShell, text tricks
+  (bidi, zero-width, encoded blobs), PDF and macro markers, archives
+  listed with member, size, ratio, traversal and link limits (never
+  extracted), and ClamAV as one signal. A missing or failing scanner
+  blocks (fail closed).
+- Export needs an owner touch bound to the exact items, their hashes and
+  the GREEN device identity. RED must be detached; GREEN must not be RED
+  and the destination directory must be on GREEN. Each file is re-hashed,
+  written to a fresh folder (no overwrite), read back with the page cache
+  dropped, and only then renamed into place; any mismatch stops the export
+  (TRANSFER_INTEGRITY_FAILURE). Only files are written: no partition
+  table, boot sector, EFI partition or volume image.
+- **Limits.** Mounting hostile media exposes the kernel's filesystem
+  driver; read-only options reduce, not remove, that risk. An inspection
+  worker exploited by a hostile file could misreport its results; the
+  sandbox limits what else it can do, and the owner still has to approve.
+  Static review finds constructs, not intent, and a clean scan is not
+  proof. Real mounts, ClamAV reopening quarantine files through
+  `/dev/fd`, and BadUSB detection on real hardware are hardware-gate
+  items (validated only in tests with fakes so far).
+
 ## Watchdog boundary (ROADMAP D8, handoff H3)
 
 - The external watchdog's interface does not exist yet, and Guardian does

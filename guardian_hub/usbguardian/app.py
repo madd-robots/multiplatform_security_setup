@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import FrozenSet, List, Optional
 
+from .airlock.service import AirlockService
 from .audit.ledger import AuditLedger
 from .audit.operations import AuditService
 from .common.canonical import canonical_loads
@@ -63,7 +64,8 @@ def build_services(launcher: WorkerLauncher, state_dir: Path, *, instance_id: st
                    allowed_key_types: FrozenSet[str] = HARDWARE_KEY_TYPES,
                    space_policy: SpacePolicy = DEFAULT_POLICY, lease_days: int = DEFAULT_LEASE_DAYS,
                    machine_root: Path = Path("/"),
-                   watchdog_adapter: Optional[WatchdogAdapter] = None) -> GuardianServices:
+                   watchdog_adapter: Optional[WatchdogAdapter] = None,
+                   airlock: Optional[AirlockService] = None) -> GuardianServices:
     """``allowed_key_types`` stays at hardware security keys outside the test suite.
 
     ``watchdog_adapter`` is None (disabled) until a real adapter exists for a reviewed watchdog.
@@ -94,6 +96,10 @@ def build_services(launcher: WorkerLauncher, state_dir: Path, *, instance_id: st
         + list(TrustService(trust).operations())
         + list(VaultService(store, trust, check, instance_id, space_policy=space_policy).operations())
         + list(AuditService(audit, trust, check).operations()) + list(watchdog.operations()))
+    if airlock is None:
+        airlock = AirlockService(state_dir / "airlock", launcher, worker_gid=launcher.worker_gid, audit=audit,
+                                 space_policy=space_policy)
+    operations += list(airlock.operations())
     lease: Optional[LeaseAuthority] = None
     if descriptor is None:
         role = "main"

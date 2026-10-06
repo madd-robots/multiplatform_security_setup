@@ -35,6 +35,16 @@ Offline leases (D5). Records travel on any media; trust comes from the owner sig
                                        [--reason TEXT]
               guardian.py lease-check  --socket S --request REQUEST [--out RECORD]
 
+USB Airlock (RED -> quarantine -> inspection -> owner approval -> GREEN):
+    guardian.py airlock-inspect  --socket S KNAME                 (also shows a GREEN device's fingerprint)
+    guardian.py airlock-acquire  --socket S --auth KEY.pub HANDLE --kname K --fingerprint FP --partition N
+                                 [--accept-review]
+    guardian.py airlock-sessions --socket S
+    guardian.py airlock-session  --socket S SESSION [--since N]
+    guardian.py airlock-export   --socket S --auth KEY.pub HANDLE --session SESSION --green-kname K
+                                 --green-fingerprint FP --dest DIR [--acknowledge-review] ITEM...
+    guardian.py airlock-discard  --socket S --auth KEY.pub HANDLE SESSION
+
 Watchdog pauses (D8; no watchdog adapter is enabled yet):
     guardian.py watchdog-status --socket S
     guardian.py watchdog-resume --socket S --auth KEY.pub HANDLE
@@ -356,6 +366,72 @@ def cmd_lease_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_airlock_inspect(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        _print(client.call("airlock.inspect", {"kname": args.kname}))
+    return 0
+
+
+def cmd_airlock_acquire(args: argparse.Namespace) -> int:
+    print("Touch the YubiKey to mount %s partition %d read-only and copy its files into quarantine."
+          % (args.kname, args.partition), file=sys.stderr)
+    with _client(args) as client:
+        _print(call_as_owner(client, _signer(*args.auth), "airlock.acquire",
+                             {"kname": args.kname, "fingerprint": args.fingerprint, "partition": args.partition,
+                              "accept_review": args.accept_review}))
+    return 0
+
+
+def cmd_airlock_sessions(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        _print(client.call("airlock.sessions"))
+    return 0
+
+
+def cmd_airlock_session(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        _print(client.call("airlock.session", {"session_id": args.session, "since": args.since, "limit": 128}))
+    return 0
+
+
+def cmd_airlock_export(args: argparse.Namespace) -> int:
+    signer = _signer(*args.auth)
+    wanted = set(args.items)
+    dest = _open_ro(args.dest, directory=True)
+    try:
+        with _client(args) as client:
+            chosen, since = [], 0
+            while True:
+                page = client.call("airlock.session", {"session_id": args.session, "since": since, "limit": 128})
+                for it in page["items_page"]:
+                    if it["item"] in wanted:
+                        chosen.append(it)
+                if len(page["items_page"]) < 128:
+                    break
+                since += 128
+            if {it["item"] for it in chosen} != wanted:
+                raise ValidationError("unknown item ids: %s" % sorted(wanted - {it["item"] for it in chosen}))
+            print("Approving for export to %s (%s):" % (args.green_kname, args.green_fingerprint), file=sys.stderr)
+            for it in chosen:
+                print("  #%d %s  %s  %s  sha256 %s" % (it["item"], it["state"], it["type"],
+                                                       display_text(it["source_path"], 120), it["sha256"]),
+                      file=sys.stderr)
+            print("Touch the YubiKey to approve exactly these files.", file=sys.stderr)
+            params = {"session_id": args.session, "green_kname": args.green_kname,
+                      "green_fingerprint": args.green_fingerprint, "acknowledge_review": args.acknowledge_review,
+                      "items": [{"item": it["item"], "sha256": it["sha256"]} for it in chosen]}
+            _print(call_as_owner(client, signer, "airlock.export", params, [dest]))
+    finally:
+        os.close(dest)
+    return 0
+
+
+def cmd_airlock_discard(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        _print(call_as_owner(client, _signer(*args.auth), "airlock.discard", {"session_id": args.session}))
+    return 0
+
+
 def cmd_watchdog_status(args: argparse.Namespace) -> int:
     with _client(args) as client:
         _print(client.call("watchdog.status"))
@@ -493,6 +569,29 @@ def main(argv: Optional[List[str]] = None) -> int:
     q = command("lease-check", cmd_lease_check, "Main: check a spinoff's request against the registry")
     q.add_argument("--request", required=True)
     q.add_argument("--out")
+    a = command("airlock-inspect", cmd_airlock_inspect, "inspect a RED (or GREEN) device")
+    a.add_argument("kname")
+    a = command("airlock-acquire", cmd_airlock_acquire, "acquire a RED volume into quarantine (touch)")
+    a.add_argument("--auth", nargs=2, required=True, metavar=("KEY_PUB", "HANDLE"))
+    a.add_argument("--kname", required=True)
+    a.add_argument("--fingerprint", required=True)
+    a.add_argument("--partition", type=int, required=True, help="partition index, 0 for a whole-device filesystem")
+    a.add_argument("--accept-review", action="store_true")
+    command("airlock-sessions", cmd_airlock_sessions, "list airlock sessions")
+    a = command("airlock-session", cmd_airlock_session, "show a session's items and findings")
+    a.add_argument("session")
+    a.add_argument("--since", type=int, default=0)
+    a = command("airlock-export", cmd_airlock_export, "approve items and export them to GREEN (touch)")
+    a.add_argument("--auth", nargs=2, required=True, metavar=("KEY_PUB", "HANDLE"))
+    a.add_argument("--session", required=True)
+    a.add_argument("--green-kname", required=True)
+    a.add_argument("--green-fingerprint", required=True)
+    a.add_argument("--dest", required=True, help="directory on the mounted GREEN device")
+    a.add_argument("--acknowledge-review", action="store_true")
+    a.add_argument("items", nargs="+", type=int)
+    a = command("airlock-discard", cmd_airlock_discard, "delete a session's quarantine copies (touch)")
+    a.add_argument("--auth", nargs=2, required=True, metavar=("KEY_PUB", "HANDLE"))
+    a.add_argument("session")
     command("watchdog-status", cmd_watchdog_status, "show watchdog pauses and recent signals")
     w = command("watchdog-resume", cmd_watchdog_resume, "lift watchdog pauses (owner touch)")
     w.add_argument("--auth", nargs=2, required=True, metavar=("KEY_PUB", "HANDLE"))

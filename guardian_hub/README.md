@@ -57,6 +57,11 @@ guardian_hub/
       machine.py              machine binding digest (DMI, machine-id); not attestation
       spinoff.py              spinoff lease state, its own key, the ACTIVE gate, clock high-water mark
       issuer.py               Guardian Main: issue, renew, reissue, revoke; generations in the registry
+    airlock/                  USB Airlock (D10): RED -> quarantine -> inspection -> approval -> GREEN
+      structure.py            partition table, ESP, boot flags and boot code (worker, read-only fd)
+      content.py              type from content, static script review, archive limits (no extraction)
+      handlers.py             sandboxed workers: structure, content, ClamAV
+      service.py              airlock.inspect / acquire / sessions / session / export / discard
     watchdog/                 watchdog boundary (D8): disabled adapter, pause-only effect
       adapter.py              Guardian's signal vocabulary and the adapter protocol
       pause.py                pause classes, watchdog.report / status / resume (owner touch)
@@ -123,6 +128,30 @@ python3 -I -B guardian.py install-debian ... --enable-service
 
 Before running the install, compare the anchor printed by the dry run
 with Guardian Main's (`trust-status`).
+
+## USB Airlock (D10)
+
+RED media is untrusted. Files move to GREEN media only through Guardian's
+quarantine, never directly:
+
+```
+python3 -I -B guardian.py airlock-inspect --socket S sdb          # identity, BadUSB, partitions, verdict
+python3 -I -B guardian.py airlock-acquire --socket S --auth KEY.pub HANDLE \
+    --kname sdb --fingerprint FP --partition 1                    # read-only mount, copy, unmount, inspect
+python3 -I -B guardian.py airlock-session --socket S SESSION      # states and findings per file
+# detach RED, attach and mount GREEN, then:
+python3 -I -B guardian.py airlock-inspect --socket S sdc          # GREEN fingerprint
+python3 -I -B guardian.py airlock-export --socket S --auth KEY.pub HANDLE --session SESSION \
+    --green-kname sdc --green-fingerprint FP --dest /media/green 1 2 [--acknowledge-review]
+```
+
+States: PASS, REVIEW_REQUIRED (exportable after acknowledging), BLOCKED,
+MALWARE_DETECTED_BY_SCANNER, STRUCTURAL_ANOMALY, UNSUPPORTED_FILE_TYPE.
+ClamAV (`clamav` package) is required: without it every file is BLOCKED.
+A clean scan is one signal, not proof. Executables, disk and boot images
+are blocked in this data-transfer mode. The export writes the files and
+`airlock-manifest.json` (all hashes) into a new `GUARDIAN-AIRLOCK-<session>`
+folder and reads every file back.
 
 ## Spinoff leases (D5)
 

@@ -408,6 +408,19 @@ GREEN, incoming content is never executed, and only approved files reach
 GREEN (no images, boot sectors or partition tables). The logic is reused
 from `mx_usb_airlock` where it fits.
 
+*Implemented (handoff H4, `usbguardian/airlock`):* device and structure
+inspection, owner-touched read-only acquisition into a private quarantine,
+sandboxed content inspection and ClamAV, states PASS / REVIEW_REQUIRED /
+BLOCKED / MALWARE_DETECTED_BY_SCANNER / STRUCTURAL_ANOMALY /
+UNSUPPORTED_FILE_TYPE, owner-touched export bound to item hashes and the
+GREEN identity, RED-detached check, read-back verification and a transfer
+manifest. Ported from `mx_usb_airlock`: type signatures, text decoding and
+heuristics, PowerShell patterns. Workers can now receive read-only
+descriptors (`WorkerLauncher.run(..., fds=...)`). Open: real mounts on MX,
+ClamAV through `/dev/fd` on MX, logical (extended) MBR partitions are not
+parsed, GREEN preparation (formatting) is not part of the Airlock, and a
+separate disk/boot-image workflow does not exist.
+
 **D11 (settled 2026-10-06). Installer v2 and offline bundle.** An unprivileged
 preflight and plan comes first, then narrow privileged steps. The installer:
 - is idempotent (VERIFY, REPAIR or UPDATE an existing install)
@@ -428,7 +441,7 @@ exists, and the installer never reboots.
 3. watchdog adapter boundary (disabled by default, mock-tested, may only
    pause): **done**. The uploaded watchdog v1 needs systemd, so under D9 it
    cannot be integrated as is.
-4. USB Airlock (D10)
+4. USB Airlock (D10): **done**
 5. SysVinit preflight, installer v2, uninstall, post-install and post-reboot
    validation, offline bundle (D9, D11)
 6. `age` capsules behind the D7 hardware gate
