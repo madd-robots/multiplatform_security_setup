@@ -23,6 +23,8 @@ guardian_hub/
       fsutil.py               O_NOFOLLOW reads, atomic private writes, trusted-file checks
       log.py                  structured JSON-line logging with redaction and 0600 rotation
       text.py                 safe rendering of untrusted text
+      space.py                free-space and inode reserve checks (ROADMAP D8)
+      tools.py                external tools only from root-owned system directories
     devices/                  Stage 3 device engine (Linux)
       scanner.py              sysfs/mountinfo collection (runs in the worker), kernel-side facts
       identity.py             device identity document, fingerprint, change detection
@@ -186,5 +188,11 @@ mode. The suite covers:
   replacement enrollment, fd validation and fd-count mismatch. Two
   mutations (grant not consumed, uid not bound) were confirmed to fail the
   suite.
+- **Free space (D8):** reserve arithmetic, the inode check (skipped on FAT),
+  and re-checks during writes. Intake, package write and release are
+  refused up front, and stopped cleanly when the disk fills mid-way
+  (simulated statvfs). No partial copies or staging are left behind,
+  interrupted packages never verify, and a refused package write never
+  asks for a signature.
 - **Hygiene:** no `shell=True`, `eval`, `exec`, `pickle`, dynamic imports or
   unbounded reads; ASCII-only, licensed, stdlib-only sources.

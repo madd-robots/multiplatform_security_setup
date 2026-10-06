@@ -272,11 +272,17 @@ integrating it:
   writes, releases and device preparation. It can never trigger deletion,
   grant capabilities, satisfy `owner_key`, or bypass verification.
   Resuming is an owner operation (touch).
-- **Guardian-side gap to close regardless:** check free space (statvfs)
-  with a kept-back reserve before intake into the custody store, package
-  writes and release staging. Today those fail mid-way on a full disk. Data
-  stays safe (everything is staged and verified), but they should refuse
-  up front with a clear error.
+- **Guardian-side free-space checks: done (2026-10-06).** `common/space.py`
+  counts only space available to non-root (`f_bavail`) plus free inodes,
+  and keeps a reserve: the larger of 128 MiB or 1% of the filesystem,
+  capped at 4 GiB, plus 1024 inodes.
+  - Intake into the custody store, package writes and release staging
+    refuse before writing anything. Package writes refuse before signing,
+    so no touch is wasted.
+  - All three re-check every 64 MiB while writing, so a disk filled during
+    a long operation stops the operation cleanly: no partial custody copy,
+    no package that verifies, nothing released.
+  - Raw devices are checked against device capacity instead.
 - **Review first.** The watchdog's code is externally produced and must be
   reviewed against this security model before integration. Waiting on its
   interface: what it monitors, its alert format, and any autonomous actions.

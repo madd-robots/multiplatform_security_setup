@@ -38,6 +38,7 @@ from typing import Any, Dict, Iterable, Optional, Protocol
 from ..common.canonical import b64decode, b64encode, canonical_digest, canonical_dumps, canonical_loads
 from ..common.errors import GuardianError, IntegrityError, ValidationError
 from ..common.fsutil import write_all
+from ..common.space import DEFAULT_POLICY, InsufficientSpace, SpaceGuard, SpacePolicy
 from ..runtime import schema as S
 from .auth import KEY_ID_RE, MAX_SIGNATURE, SCHEME_RE, Signer, Verifier
 from .custody import (CHUNK, MAX_OBJECT_BYTES, MAX_SOURCE_NAME, SHA256_SPEC, TIMESTAMP_PATTERN, CustodyStore,
@@ -114,7 +115,26 @@ def _check_manifest(manifest: Any) -> Dict[str, Any]:
     return manifest
 
 
-def write_package(fd: int, store: CustodyStore, manifest: Dict[str, Any], signer: Signer) -> Dict[str, Any]:
+def _output_guard(fd: int, max_length: int, policy: SpacePolicy) -> Optional[SpaceGuard]:
+    """Refuse up front if the package cannot fit on the output (D8)."""
+    st = os.fstat(fd)
+    if stat.S_ISBLK(st.st_mode):
+        # A raw device has no free space, only capacity after the write position.
+        pos = os.lseek(fd, 0, os.SEEK_CUR)
+        end = os.lseek(fd, 0, os.SEEK_END)
+        os.lseek(fd, pos, os.SEEK_SET)
+        if pos + max_length > end:
+            raise InsufficientSpace("package does not fit on the device")
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    guard = SpaceGuard(fd, total=max_length, what="package write", policy=policy)
+    guard.start(files=0)
+    return guard
+
+
+def write_package(fd: int, store: CustodyStore, manifest: Dict[str, Any], signer: Signer, *,
+                  space_policy: SpacePolicy = DEFAULT_POLICY) -> Dict[str, Any]:
     """Stream a signed package to ``fd`` at its current position."""
     manifest = _check_manifest(manifest)
     sender = manifest["sender"]
@@ -122,6 +142,9 @@ def write_package(fd: int, store: CustodyStore, manifest: Dict[str, Any], signer
         raise ValidationError("signer does not match the manifest sender")
     mbytes = canonical_dumps(manifest)
     digest = manifest_digest(manifest)
+    # Checked before signing, so a touch is never spent on a write that cannot fit.
+    max_length = PRELUDE.size + len(mbytes) + U32.size + MAX_AUTH + manifest["total_length"] + TRAILER_SIZE
+    guard = _output_guard(fd, max_length, space_policy)
     signature = signer.sign(digest)
     if not isinstance(signature, bytes) or not 0 < len(signature) <= MAX_SIGNATURE:
         raise IntegrityError("signer returned an invalid signature")
@@ -134,6 +157,8 @@ def write_package(fd: int, store: CustodyStore, manifest: Dict[str, Any], signer
 
     def emit(data: bytes) -> None:
         nonlocal written
+        if guard is not None:
+            guard.advance(len(data))
         write_all(fd, data)
         h.update(data)
         written += len(data)

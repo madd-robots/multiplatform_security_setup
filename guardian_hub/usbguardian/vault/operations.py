@@ -21,6 +21,7 @@ import stat
 from typing import Any, Dict, Iterable, Optional
 
 from ..common.errors import IntegrityError, NotFound, ValidationError
+from ..common.space import DEFAULT_POLICY, SpacePolicy
 from ..identity.sshkeys import KEY_ID_PATTERN
 from ..identity.sshsig import MAX_SIGNATURE, NS_TRANSFER, SCHEME, SigCheck
 from ..identity.trust import TrustStore, TrustVerifier
@@ -64,7 +65,9 @@ class _Presigned:
 
 
 class VaultService:
-    def __init__(self, store: CustodyStore, trust: TrustStore, sig_check: SigCheck, instance_id: str):
+    def __init__(self, store: CustodyStore, trust: TrustStore, sig_check: SigCheck, instance_id: str, *,
+                 space_policy: SpacePolicy = DEFAULT_POLICY):
+        self.space_policy = space_policy
         self.store = store
         self.trust = trust
         self.sig_check = sig_check
@@ -124,7 +127,7 @@ class VaultService:
                 raise ValidationError("the output file must be empty")
             signer = _Presigned(manifest["sender"]["key_id"], manifest_digest(manifest),
                                 params["signature"].encode("ascii"))
-            written = write_package(fds[0], self.store, manifest, signer)
+            written = write_package(fds[0], self.store, manifest, signer, space_policy=self.space_policy)
             readback = readback_verify(fds[0], self._verifier(), written)
         finally:
             for fd in fds:
@@ -155,7 +158,7 @@ class VaultService:
             _check_fd(fds[0], "file")
             _check_fd(fds[1], "dir")
             return release_package(fds[0], self._verifier(), dest_fd=fds[1], owner=(session.uid, session.gid),
-                                   name_policy=params["name_policy"])
+                                   name_policy=params["name_policy"], space_policy=self.space_policy)
         finally:
             for fd in fds:
                 os.close(fd)

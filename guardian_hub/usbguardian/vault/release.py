@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..common.errors import SecurityViolation, ValidationError
 from ..common.fsutil import fsync_dir, open_dir_nofollow, write_all
 from ..common.names import check_component
+from ..common.space import DEFAULT_POLICY, SpaceGuard, SpacePolicy
 from .auth import Verifier
 from .package import verify_package
 
@@ -54,7 +55,10 @@ def plan_names(objects: List[Dict[str, Any]], policy: str) -> List[Tuple[str, bo
 
 
 class _StagingSink:
-    def __init__(self, dest_fd: int, policy: str, file_mode: int, owner: Optional[Tuple[int, int]]):
+    def __init__(self, dest_fd: int, policy: str, file_mode: int, owner: Optional[Tuple[int, int]],
+                 space_policy: SpacePolicy = DEFAULT_POLICY):
+        self.space_policy = space_policy
+        self.guard: Optional[SpaceGuard] = None
         self.dest_fd = dest_fd
         self.policy = policy
         self.file_mode = file_mode
@@ -82,6 +86,10 @@ class _StagingSink:
             if _exists(final, self.dest_fd):
                 raise SecurityViolation("destination already contains %s; nothing is overwritten" % final,
                                         code="DESTINATION_EXISTS")
+        # The whole release must fit with the reserve intact before the first payload byte (D8).
+        self.guard = SpaceGuard(self.dest_fd, total=manifest["total_length"], what="release",
+                                policy=self.space_policy)
+        self.guard.start(files=len(manifest["objects"]) + 1)
 
     def begin(self, index: int, obj: Dict[str, Any]) -> None:
         self._out = os.open("obj-%d" % index, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -91,6 +99,8 @@ class _StagingSink:
         os.fchmod(self._out, self.file_mode)
 
     def write(self, data: bytes) -> None:
+        if self.guard is not None:
+            self.guard.advance(len(data))
         write_all(self._out, data)
 
     def end(self, index: int) -> None:
@@ -166,7 +176,8 @@ def _open_destination(dest_dir: Optional[Path], dest_fd: Optional[int], owner_ui
 
 def release_package(fd: int, verifier: Verifier, dest_dir: Optional[Path] = None, *, dest_fd: Optional[int] = None,
                     owner: Optional[Tuple[int, int]] = None, start: int = 0, require_end: bool = True,
-                    name_policy: str = "strict", file_mode: int = 0o600) -> Dict[str, Any]:
+                    name_policy: str = "strict", file_mode: int = 0o600,
+                    space_policy: SpacePolicy = DEFAULT_POLICY) -> Dict[str, Any]:
     """Verify a package and, only if every check passes, release its objects into the destination.
 
     The destination is a path or an open directory fd (from a broker client).
@@ -182,7 +193,7 @@ def release_package(fd: int, verifier: Verifier, dest_dir: Optional[Path] = None
     dest_fd = _open_destination(None if dest_dir is None else Path(dest_dir), dest_fd,
                                 owner[0] if owner is not None else os.geteuid())
     try:
-        sink = _StagingSink(dest_fd, name_policy, file_mode, owner)
+        sink = _StagingSink(dest_fd, name_policy, file_mode, owner, space_policy)
         try:
             report = verify_package(fd, verifier, start=start, sink=sink, require_end=require_end)
             sink.publish()

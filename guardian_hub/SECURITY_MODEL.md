@@ -138,6 +138,18 @@ and deployments were not altered. Secrecy comes second.
   the audit ledger. Recovery is re-rooting from known-good media.
 - Not yet validated with real YubiKeys (see ROADMAP Stage 5 notes).
 
+## Space exhaustion (ROADMAP D8)
+
+- Every Guardian write path checks free space and free inodes against a
+  reserve before it starts, and re-checks while it runs. Filling the disk
+  can make Guardian refuse or stop work, but it cannot make Guardian leave
+  partial or unverifiable results behind, or spend a YubiKey touch on a
+  write that cannot fit.
+- The space check is advisory against a determined local attacker: space
+  can still be taken between two checks. The guarantee that holds is the
+  fail-closed one above, not uninterrupted service. Detecting and
+  responding to fill attacks is the external watchdog's job (D8).
+
 ## Known limitations (not hidden, not yet fixed)
 
 - **No syscall filter, Landlock or network isolation for workers yet** (see

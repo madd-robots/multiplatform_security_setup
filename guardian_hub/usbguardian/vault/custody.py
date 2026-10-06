@@ -29,6 +29,7 @@ from ..common.canonical import canonical_dumps, canonical_loads
 from ..common.errors import (IntegrityError, NotFound, ResourceLimitExceeded, SecurityViolation,
                              ValidationError)
 from ..common.fsutil import atomic_write, ensure_private_dir, read_file_bounded, write_all
+from ..common.space import DEFAULT_POLICY, SpaceGuard, SpacePolicy
 from ..common.text import display_text
 from ..runtime import schema as S
 
@@ -97,8 +98,9 @@ def hash_fd(fd: int, *, offset: int = 0, length: Optional[int] = None, drop_cach
 
 
 class CustodyStore:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, space_policy: SpacePolicy = DEFAULT_POLICY):
         self.root = Path(root)
+        self.space_policy = space_policy
         ensure_private_dir(self.root)
         for sub in ("objects", "records", "tmp"):
             ensure_private_dir(self.root / sub)
@@ -126,7 +128,15 @@ class CustodyStore:
             fd = source
         tmp = self.root / "tmp" / secrets.token_hex(16)
         try:
-            sha256, length = self._copy_in(fd, tmp, max_bytes)
+            st = os.fstat(fd)
+            size = st.st_size if stat.S_ISREG(st.st_mode) else None  # unknown for pipes
+            if size is not None and size > max_bytes:
+                raise ResourceLimitExceeded("source larger than %d bytes" % max_bytes)
+            # Object plus record; re-checked while copying (the source may grow, or
+            # someone may fill the disk meanwhile).
+            guard = SpaceGuard(str(self.root), total=size, what="custody intake", policy=self.space_policy)
+            guard.start(files=2)
+            sha256, length = self._copy_in(fd, tmp, max_bytes, guard)
         except BaseException:
             try:
                 os.unlink(tmp)
@@ -142,7 +152,7 @@ class CustodyStore:
         atomic_write(self.root / "records" / (record["record_id"] + ".json"), canonical_dumps(record), mode=0o400)
         return record
 
-    def _copy_in(self, fd: int, tmp: Path, max_bytes: int) -> "tuple[str, int]":
+    def _copy_in(self, fd: int, tmp: Path, max_bytes: int, guard: SpaceGuard) -> "tuple[str, int]":
         h = hashlib.sha256()
         length = 0
         out = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
@@ -158,6 +168,7 @@ class CustodyStore:
                 length += len(chunk)
                 if length > max_bytes:
                     raise ResourceLimitExceeded("source larger than %d bytes" % max_bytes)
+                guard.advance(len(chunk))
                 h.update(chunk)
                 write_all(out, chunk)
             os.fsync(out)
