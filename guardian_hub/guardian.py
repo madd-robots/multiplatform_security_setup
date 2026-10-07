@@ -82,6 +82,10 @@ Device assurance (Stage 8):
     guardian.py artifacts-install --socket S FILE
     guardian.py artifact-verify  --socket S FILE [--name NAME]
 
+Terminal UI (Stage 9):
+    guardian.py ui --socket S [--auth KEY.pub HANDLE]      dashboard, devices, keys, custody, airlock,
+                                                            forge/lease, reports, audit, watchdog
+
 Audit ledger:
     guardian.py audit-status     --socket S
     guardian.py audit-verify     --socket S
@@ -582,6 +586,18 @@ def cmd_artifact_verify(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ui(args: argparse.Namespace) -> int:
+    import curses
+    from usbguardian.ui.app import ReconnectingClient, run
+    signer = _signer(*args.auth) if args.auth else None
+    client = ReconnectingClient(lambda: BrokerClient(Path(args.socket), timeout=180.0))
+    try:
+        curses.wrapper(run, client, signer)
+    finally:
+        client.close()
+    return 0
+
+
 def cmd_watchdog_status(args: argparse.Namespace) -> int:
     with _client(args) as client:
         _print(client.call("watchdog.status"))
@@ -799,6 +815,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     q = command("lease-check", cmd_lease_check, "Main: check a spinoff's request against the registry")
     q.add_argument("--request", required=True)
     q.add_argument("--out")
+    u = command("ui", cmd_ui, "terminal UI")
+    u.add_argument("--auth", nargs=2, metavar=("KEY_PUB", "HANDLE"))
     command("devices", cmd_devices, "list block devices with identity and findings")
     a = command("assurance-device", cmd_assurance_device, "device assurance report")
     a.add_argument("kname")

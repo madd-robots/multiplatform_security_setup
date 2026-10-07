@@ -6,11 +6,11 @@ Windows. The full plan, stage status and the design changes made along the way
 are in [ROADMAP.md](ROADMAP.md). Read [SECURITY_MODEL.md](SECURITY_MODEL.md)
 for what the code enforces today and what it does not.
 
-**Status.** Stages 1 to 6 are implemented, Stage 7 for Debian/MX, and the
+**Status.** Stages 1 to 6, 8 and 9 are implemented, Stage 7 for Debian/MX, and the
 owner handoff items: audit ledger, offline leases (D5), watchdog boundary,
 USB Airlock (D10), SysVinit preflight and installer v2 with an offline
-bundle (D9, D11), and `age` capsule mechanics (D7). Termux, Windows, the
-Stage 8 reports and the Stage 9 UI are not started. Everything is tested
+bundle (D9, D11), and `age` capsule mechanics (D7). Termux and Windows
+are not started. Everything is tested
 here with software keys, fixtures and fakes; **nothing has yet run on the
 MX machine with the two YubiKeys** (see "Hardware gates" in ROADMAP.md).
 Hardware-backed encryption is not offered until the D7 gate passes.
@@ -68,6 +68,7 @@ guardian_hub/
       drives.py               registry of erase-verified drives; changed identity -> rejected
       reports.py              reports recorded in the audit ledger, owner-signable, verifiable offline
       service.py              assurance.* operations, trusted-artifact lists, erase-verification hook
+    ui/                       Stage 9 terminal UI (curses): model, views (escaped), actions, app
     airlock/                  USB Airlock (D10): RED -> quarantine -> inspection -> approval -> GREEN
       structure.py            partition table, ESP, boot flags and boot code (worker, read-only fd)
       content.py              type from content, static script review, archive limits (no extraction)
@@ -159,6 +160,17 @@ broad upgrades, bootloader, init conversion and systemd. Running it again
 is safe. `uninstall-guardian --yes` removes Guardian's code and service and
 keeps state, keys, data and configuration. The older single-step
 `install-debian` remains for development.
+
+## Terminal UI (Stage 9)
+
+```
+python3 -I -B guardian.py ui --socket /run/usbguardian/broker.sock --auth guardian-key-a.pub guardian-key-a
+```
+
+Keys 1 to 9 switch screens (dashboard, devices, owner keys, custody,
+Airlock, Forge or lease, reports, audit, watchdog), `r` refreshes, `q`
+quits; each screen lists its own keys at the bottom. Without `--auth` the
+UI is read-only apart from what needs no touch.
 
 ## Device assurance (Stage 8)
 

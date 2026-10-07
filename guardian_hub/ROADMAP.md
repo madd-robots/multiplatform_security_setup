@@ -16,7 +16,7 @@ records where the implementation deviates from it and why.
 | 7 Platforms | Debian/MX first, then Termux, then Windows | **Debian/MX done** (`usbguardian/deploy`); Termux and Windows not started, see notes |
 | 8 Device assurance | firmware and artifact verification, erase verification, reports | **Done** (`usbguardian/assurance`, audit ledger in `usbguardian/audit`); see notes |
 | Handoff | leases (D5), watchdog boundary (D8), Airlock (D10), SysVinit preflight and installer v2 (D9, D11), capsules (D7) | **Done in code and tests**; hardware gates open (see "Hardware gates" below) |
-| 9 Final UI | dashboard, managers, forge, audit viewer | Not started |
+| 9 Final UI | dashboard, managers, forge, audit viewer | **Done** as a terminal UI (`usbguardian/ui`); see notes |
 
 ### Stage 2 hardening still open
 
@@ -193,6 +193,30 @@ before anything can rely on it, and none was claimed as done.
   implementation, as the build guide says. The formats are already
   portable: canonical JSON (an RFC 8785 subset), SSHSIG via the
   `ssh-keygen` that ships with Windows, and the package format.
+
+### Stage 9 notes
+
+- **Terminal UI** (`guardian.py ui --socket S [--auth KEY.pub HANDLE]`),
+  curses from the standard library: no web server, no network port, no
+  GUI toolkit to install. Screens: dashboard, devices (with live
+  erase-verification progress and the drive registry), owner keys,
+  custody records, Airlock sessions and items, Forge deployments or the
+  spinoff's lease, reports (details, signing), audit viewer (paging,
+  chain verification, checkpoints) and watchdog.
+- The UI is only a broker client: it holds no authority, and owner
+  actions use the same operations and touches as the command line.
+  Erase-verification additionally asks for the device name to be typed;
+  the broker re-checks the fingerprint the screen showed before writing.
+- Every device- or media-supplied string is escaped before display, so
+  terminal escape sequences, bidi controls and fake line breaks cannot
+  redraw or spoof the screen. A screen whose data is malformed shows a
+  message instead of crashing.
+- Not in the UI: Airlock export and transfer release need a destination
+  directory the user opens, and stay on the command line; enrollment and
+  installation stay on the Rescue USB command line by design.
+- The build guide's graphical dashboard is not built: a GUI toolkit adds
+  dependencies and attack surface without adding anything the threat
+  model needs. Possible later if the owner wants it.
 
 ### Stage 8 notes
 

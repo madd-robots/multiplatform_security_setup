@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
 from ..common.canonical import canonical_dumps, canonical_loads
-from ..common.errors import (IntegrityError, NotFound, ResourceLimitExceeded, SecurityViolation,
+from ..common.errors import (GuardianError, IntegrityError, NotFound, ResourceLimitExceeded, SecurityViolation,
                              ValidationError)
 from ..common.fsutil import atomic_write, ensure_private_dir, open_dir_nofollow, read_file_bounded, write_all
 from ..common.space import DEFAULT_POLICY, SpaceGuard, SpacePolicy
@@ -245,6 +245,19 @@ class CustodyStore:
             os.close(fd)
         if actual != (sha256, length):
             raise IntegrityError("custody object %s was altered in the store" % sha256[:16])
+
+    def list_records(self, since: int, limit: int) -> Dict[str, Any]:
+        """Custody records, oldest first by intake time; objects are not re-hashed here (verify does that)."""
+        names = [n[:-5] for n in os.listdir(self.root / "records") if n.endswith(".json") and RECORD_ID_RE.match(n[:-5])]
+        records = []
+        for rid in names:
+            try:
+                records.append(self.load_record(rid, verify=False))
+            except GuardianError:
+                records.append({"record_id": rid, "source_name": "", "sha256": "", "length": 0,
+                                "intake_time": "", "unreadable": True})
+        records.sort(key=lambda r: (r["intake_time"], r["record_id"]))
+        return {"total": len(records), "records": records[since:since + limit]}
 
     def load_record(self, record_id: str, *, verify: bool = True) -> Dict[str, Any]:
         """Load an intake record.  By default the stored object is re-verified against it."""

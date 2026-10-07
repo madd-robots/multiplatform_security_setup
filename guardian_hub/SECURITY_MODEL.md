@@ -263,6 +263,14 @@ and deployments were not altered. Secrecy comes second.
   `/dev/fd`, and BadUSB detection on real hardware are hardware-gate
   items (validated only in tests with fakes so far).
 
+## Terminal UI (Stage 9)
+
+- A broker client without authority of its own; it opens no network port
+  and never asks for or shows a secret. Owner actions need the same touch
+  as on the command line.
+- All strings from devices and media are escaped before display, so they
+  cannot inject terminal control sequences.
+
 ## Device assurance (Stage 8)
 
 - Reports state what a device presents and say explicitly what cannot be

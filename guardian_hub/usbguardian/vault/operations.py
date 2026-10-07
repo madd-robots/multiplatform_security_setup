@@ -170,6 +170,9 @@ class VaultService:
         return (
             Operation("vault.intake", "vault.write", S.Obj({"names": names}), inline=self.intake,
                       session_aware=True, fds=(1, MAX_FDS), requires_active=True, pause_class="intake"),
+            Operation("vault.records", "vault.prepare",
+                      S.Obj({"since": S.Int(min_value=0, max_value=10 ** 6), "limit": S.Int(min_value=1, max_value=128)}),
+                      inline=lambda p, params: self.store.list_records(params["since"], params["limit"])),
             Operation("transfer.prepare", "vault.prepare",
                       S.Obj({"record_ids": record_ids, "key_id": S.Str(pattern=KEY_ID_PATTERN, max_len=71)}),
                       inline=self.prepare, session_aware=True),
