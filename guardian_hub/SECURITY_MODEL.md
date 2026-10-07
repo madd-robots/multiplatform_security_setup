@@ -263,6 +263,20 @@ and deployments were not altered. Secrecy comes second.
   `/dev/fd`, and BadUSB detection on real hardware are hardware-gate
   items (validated only in tests with fakes so far).
 
+## Device assurance (Stage 8)
+
+- Reports state what a device presents and say explicitly what cannot be
+  verified: controller firmware, spare flash, and whether the device
+  behaves the same towards other hosts. A clean report is not proof of
+  clean firmware.
+- An erase-verification proves only the logical address space (and with
+  it the real capacity). A drive enters the registry only after one
+  passes; if the same drive later presents another identity, it is
+  rejected for good.
+- Report digests are in the audit ledger before the report exists;
+  signatures are optional and checked against enrolled owner keys only.
+- Trusted-artifact lists are owner-signed and re-verified on every use.
+
 ## Watchdog boundary (ROADMAP D8, handoff H3)
 
 - The external watchdog's interface does not exist yet, and Guardian does

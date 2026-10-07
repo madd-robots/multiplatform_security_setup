@@ -38,8 +38,10 @@ NS_LEASE = "guardian-lease@v1"
 NS_SPINOFF = "guardian-spinoff@v1"  # signed by a spinoff's own (non-owner) key
 NS_BUNDLE = "guardian-bundle@v1"    # offline installation bundle manifests
 NS_RECIPIENTS = "guardian-recipients@v1"  # capsule recipient sets (D7)
+NS_REPORT = "guardian-report@v1"    # assurance reports (Stage 8)
+NS_ARTIFACTS = "guardian-artifacts@v1"  # trusted artifact lists (Stage 8)
 NAMESPACES = frozenset({NS_OWNER, NS_TRANSFER, NS_TRUST, NS_ENROLL, NS_DEPLOY, NS_AUDIT, NS_LEASE, NS_SPINOFF,
-                        NS_BUNDLE, NS_RECIPIENTS})
+                        NS_BUNDLE, NS_RECIPIENTS, NS_REPORT, NS_ARTIFACTS})
 SCHEME = "sshsig"
 MAX_SIGNATURE = 16 * 1024
 _BEGIN = b"-----BEGIN SSH SIGNATURE-----"

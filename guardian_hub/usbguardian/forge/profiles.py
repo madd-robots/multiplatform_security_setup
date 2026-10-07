@@ -21,11 +21,11 @@ PLATFORMS: Dict[str, Dict[str, object]] = {
 # Spinoffs never become authorities (build guide rule): Forge stays on Guardian Main.
 FORGE_ONLY: FrozenSet[str] = frozenset({"forge.build", "forge.prepare"})
 
-_BASE = {"runtime.status", "auth.assert", "trust.read", "lease.read", "lease.manage"}
+_BASE = {"runtime.status", "auth.assert", "trust.read", "lease.read", "lease.manage", "assurance.read"}
 PROFILES: Dict[str, FrozenSet[str]] = {
     "full": frozenset(set(CAPABILITIES) - FORGE_ONLY),
     "recovery": frozenset(_BASE | {"runtime.diagnostics", "device.inspect", "device.modify", "vault.verify",
-                                   "vault.read", "keys.manage"}),
+                                   "vault.read", "keys.manage", "assurance.manage"}),
     "storage": frozenset(_BASE | {"vault.prepare", "vault.verify", "vault.read", "vault.write", "keys.manage",
                                   "device.inspect", "airlock.read", "airlock.acquire", "airlock.export"}),
     "diagnostic": frozenset(_BASE | {"runtime.diagnostics", "device.inspect", "vault.verify", "airlock.read"}),

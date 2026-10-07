@@ -20,13 +20,14 @@ from pathlib import Path
 from typing import FrozenSet, List, Optional
 
 from .airlock.service import AirlockService
+from .assurance.service import AssuranceService
 from .audit.ledger import AuditLedger
 from .audit.operations import AuditService
 from .common.canonical import canonical_loads
 from .common.errors import ConfigError
 from .common.fsutil import ensure_private_dir, read_file_bounded
 from .common.space import DEFAULT_POLICY, SpacePolicy
-from .devices.operations import device_operations
+from .devices.operations import DEVICE_PROFILE, device_operations
 from .forge.descriptor import check_descriptor
 from .forge.registry import DeploymentRegistry
 from .forge.service import ForgeService
@@ -94,8 +95,12 @@ def build_services(launcher: WorkerLauncher, state_dir: Path, *, instance_id: st
     if swept["removed"]:
         audit.append("custody.startup_cleanup", removed=swept["removed"], bytes=swept["bytes"])
     watchdog = PauseController(state_dir / "watchdog", adapter=watchdog_adapter, audit=audit)
+    assurance = AssuranceService(
+        state_dir / "assurance", trust, check, instance_id, audit=audit,
+        inspect_device=lambda kname: launcher.run(DEVICE_PROFILE, "devices.inspect", {"kname": kname}))
     operations: List[Operation] = (
-        list(default_operations()) + list(device_operations(launcher)) + list(owner.operations())
+        list(default_operations()) + list(device_operations(launcher, on_result=assurance.erase_hook))
+        + list(assurance.operations()) + list(owner.operations())
         + list(TrustService(trust).operations())
         + list(VaultService(store, trust, check, instance_id, space_policy=space_policy).operations())
         + list(AuditService(audit, trust, check).operations()) + list(watchdog.operations()))

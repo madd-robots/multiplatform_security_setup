@@ -48,6 +48,7 @@ CAPABILITIES: Dict[str, Capability] = {c.name: c for c in (
     Capability("lease.manage", "create lease requests and import owner-signed lease records"),
     Capability("watchdog.report", "report watchdog signals (can only pause write operations)"),
     Capability("airlock.read", "inspect RED devices and read airlock sessions"),
+    Capability("assurance.read", "device assurance reports, drive registry, artifact verification"),
     Capability("device.modify", "erase, partition or format a device", frozenset({FACTOR_OWNER_KEY})),
     Capability("vault.read", "decrypt vault contents", frozenset({FACTOR_OWNER_KEY})),
     Capability("vault.write", "encrypt into or change a vault", frozenset({FACTOR_OWNER_KEY})),
@@ -58,6 +59,7 @@ CAPABILITIES: Dict[str, Capability] = {c.name: c for c in (
                frozenset({FACTOR_OWNER_KEY})),
     Capability("airlock.export", "approve quarantined files and export them to GREEN media",
                frozenset({FACTOR_OWNER_KEY})),
+    Capability("assurance.manage", "sign reports and install trusted artifact lists", frozenset({FACTOR_OWNER_KEY})),
 )}
 
 MAX_POLICY_BYTES = 64 * 1024

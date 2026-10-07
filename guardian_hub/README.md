@@ -63,6 +63,11 @@ guardian_hub/
       machine.py              machine binding digest (DMI, machine-id); not attestation
       spinoff.py              spinoff lease state, its own key, the ACTIVE gate, clock high-water mark
       issuer.py               Guardian Main: issue, renew, reissue, revoke; generations in the registry
+    assurance/                Stage 8 device assurance
+      facts.py                exposed facts, firmware indicators, what cannot be verified, inconsistencies
+      drives.py               registry of erase-verified drives; changed identity -> rejected
+      reports.py              reports recorded in the audit ledger, owner-signable, verifiable offline
+      service.py              assurance.* operations, trusted-artifact lists, erase-verification hook
     airlock/                  USB Airlock (D10): RED -> quarantine -> inspection -> approval -> GREEN
       structure.py            partition table, ESP, boot flags and boot code (worker, read-only fd)
       content.py              type from content, static script review, archive limits (no extraction)
@@ -154,6 +159,23 @@ broad upgrades, bootloader, init conversion and systemd. Running it again
 is safe. `uninstall-guardian --yes` removes Guardian's code and service and
 keeps state, keys, data and configuration. The older single-step
 `install-debian` remains for development.
+
+## Device assurance (Stage 8)
+
+```
+python3 -I -B guardian.py devices --socket S                        # list, with fingerprints
+python3 -I -B guardian.py assurance-device --socket S sdb           # what it exposes and what cannot be verified
+python3 -I -B guardian.py erase-verify --socket S --auth KEY.pub HANDLE \
+    --kname sdb --fingerprint FP --confirm sdb                      # DESTROYS sdb; writes a report
+python3 -I -B guardian.py device-jobs --socket S                    # progress (another terminal)
+python3 -I -B guardian.py report-sign --socket S --auth KEY.pub HANDLE REPORT_ID
+python3 -I -B guardian.py report-export --socket S REPORT_ID --out report.json
+python3 -I -B guardian.py report-verify report.json --trust-log trust.log --trust-anchor trust.anchor
+python3 -I -B guardian.py artifacts-sign --list list.json --trust-anchor trust.anchor --auth KEY.pub HANDLE \
+    --out artifacts.signed
+python3 -I -B guardian.py artifacts-install --socket S artifacts.signed
+python3 -I -B guardian.py artifact-verify --socket S mx-23.iso --name mx-23.iso
+```
 
 ## USB Airlock (D10)
 

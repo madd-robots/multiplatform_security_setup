@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Callable, Dict, Iterable, Optional
+import threading
+import time
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from ..common.errors import IntegrityError, SecurityViolation
 from ..common.log import get_logger, log_event
@@ -36,6 +38,52 @@ KNAME_SPEC = S.Str(pattern=KNAME_PATTERN, max_len=32)
 FINGERPRINT_SPEC = S.Str(pattern=r"[0-9a-f]{64}", max_len=64)
 
 InspectFn = Callable[[str], Dict[str, Any]]
+# Called after a completed surface test with (principal name, report before, result, report after);
+# returns extra fields for the response (Stage 8 stores an erase-verification report here).
+ResultHook = Callable[[str, Dict[str, Any], Dict[str, Any], Dict[str, Any]], Dict[str, Any]]
+
+
+class JobTracker:
+    """Progress of running surface tests, and cancellation requests (read by other connections)."""
+
+    def __init__(self, clock: Callable[[], float] = time.time):
+        self._lock = threading.Lock()
+        self._jobs: Dict[str, Dict[str, Any]] = {}
+        self._cancel: set = set()
+        self.clock = clock
+
+    def start(self, kname: str, fingerprint: str, size: int) -> None:
+        with self._lock:
+            if kname in self._jobs:
+                raise SecurityViolation("a surface test is already running on this device", code="DEVICE_BUSY")
+            self._jobs[kname] = {"kname": kname, "fingerprint": fingerprint, "phase": "starting", "done": 0,
+                                 "total": size, "started": int(self.clock())}
+            self._cancel.discard(kname)
+
+    def progress(self, kname: str, phase: str, done: int, total: int) -> None:
+        with self._lock:
+            if kname in self._jobs:
+                self._jobs[kname].update(phase=phase, done=done, total=total)
+
+    def should_stop(self, kname: str) -> bool:
+        with self._lock:
+            return kname in self._cancel
+
+    def cancel(self, kname: str) -> bool:
+        with self._lock:
+            if kname not in self._jobs:
+                return False
+            self._cancel.add(kname)
+            return True
+
+    def finish(self, kname: str) -> None:
+        with self._lock:
+            self._jobs.pop(kname, None)
+            self._cancel.discard(kname)
+
+    def snapshot(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            return [dict(j, cancelling=j["kname"] in self._cancel) for j in self._jobs.values()]
 
 # The report comes from a worker that parsed device-controlled data, so it
 # is validated before the broker relies on any field of it.
@@ -54,8 +102,11 @@ REPORT_SPEC = S.Obj({
 class SurfaceTestRunner:
     def __init__(self, inspect: InspectFn, *, open_device: Callable[[str, str], int] = open_block_device,
                  io_factory: Callable[..., Any] = FdBlockIO, dev_root: str = "/dev", sysfs_root: str = "/sys",
-                 logger: Optional[logging.Logger] = None):
+                 logger: Optional[logging.Logger] = None, jobs: Optional[JobTracker] = None,
+                 on_result: Optional[ResultHook] = None):
         self.inspect = inspect
+        self.jobs = jobs or JobTracker()
+        self.on_result = on_result
         self.sysfs_root = sysfs_root
         self.open_device = open_device
         self.io_factory = io_factory
@@ -82,31 +133,48 @@ class SurfaceTestRunner:
             raise SecurityViolation("worker report disagrees with the kernel", code="DEVICE_IDENTITY_CHANGED")
         log_event(self.logger, logging.WARNING, "device.surface_test.start", principal=principal.name,
                   kname=kname, fingerprint=expected, size_bytes=size)
-        fd = self.open_device(os.path.join(self.dev_root, kname), dev["dev"])
+        self.jobs.start(kname, expected, size)
         try:
-            if os.lseek(fd, 0, os.SEEK_END) != size:
-                raise SecurityViolation("device size changed", code="DEVICE_IDENTITY_CHANGED")
-            result = surface_test(self.io_factory(fd, size, direct=True), size)
+            fd = self.open_device(os.path.join(self.dev_root, kname), dev["dev"])
+            try:
+                if os.lseek(fd, 0, os.SEEK_END) != size:
+                    raise SecurityViolation("device size changed", code="DEVICE_IDENTITY_CHANGED")
+                started = time.monotonic()
+                result = surface_test(self.io_factory(fd, size, direct=True), size,
+                                      progress=lambda phase, done, total: self.jobs.progress(kname, phase, done, total),
+                                      should_stop=lambda: self.jobs.should_stop(kname))
+                result["seconds"] = int(time.monotonic() - started)
+            finally:
+                os.close(fd)
         finally:
-            os.close(fd)
+            self.jobs.finish(kname)
         after = S.validate(REPORT_SPEC, self.inspect(kname), "$.report")
         if after["fingerprint"] != expected:
             raise IntegrityError("device identity changed during the surface test", code="DEVICE_IDENTITY_CHANGED")
         log_event(self.logger, logging.WARNING, "device.surface_test.done", kname=kname, fingerprint=expected,
                   passed=result["passed"], bad_chunks=result["bad_chunks"],
                   verified_bytes=result["verified_bytes"])
-        return {"kname": kname, "fingerprint": expected, "result": result}
+        response = {"kname": kname, "fingerprint": expected, "result": result}
+        if self.on_result is not None:
+            response.update(self.on_result(principal.name, before, result, after))
+        return response
 
 
 def device_operations(launcher: WorkerLauncher,
-                      surface_runner: Optional[SurfaceTestRunner] = None) -> Iterable[Operation]:
+                      surface_runner: Optional[SurfaceTestRunner] = None,
+                      on_result: Optional[ResultHook] = None) -> Iterable[Operation]:
     if surface_runner is None:
         surface_runner = SurfaceTestRunner(
-            lambda kname: launcher.run(DEVICE_PROFILE, "devices.inspect", {"kname": kname}))
+            lambda kname: launcher.run(DEVICE_PROFILE, "devices.inspect", {"kname": kname}), on_result=on_result)
+    jobs = surface_runner.jobs
     return (
         Operation("device.list", "device.inspect", S.EMPTY, worker_handler="devices.scan", profile=DEVICE_PROFILE),
         Operation("device.inspect", "device.inspect", S.Obj({"kname": KNAME_SPEC}),
                   worker_handler="devices.inspect", profile=DEVICE_PROFILE),
         Operation("device.surface_test", "device.modify", S.Obj({"kname": KNAME_SPEC, "fingerprint": FINGERPRINT_SPEC}),
                   inline=surface_runner, requires_active=True, pause_class="device_modify"),
+        Operation("device.jobs", "device.inspect", S.EMPTY, inline=lambda p, params: {"jobs": jobs.snapshot()}),
+        # Stopping a destructive run early never needs a touch: it can only make the run end sooner.
+        Operation("device.cancel", "device.inspect", S.Obj({"kname": KNAME_SPEC}),
+                  inline=lambda p, params: {"cancelling": jobs.cancel(params["kname"])}),
     )

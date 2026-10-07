@@ -66,6 +66,22 @@ Installer v2 (SysVinit only; offline bundle; plan first, then a narrow privilege
     guardian.py install-validate [--post-reboot] [--exercise-service]
     guardian.py uninstall-guardian --yes                           (root; keeps state, keys, data and config)
 
+Device assurance (Stage 8):
+    guardian.py devices          --socket S
+    guardian.py assurance-device --socket S KNAME                  report: exposed facts, inconsistencies, registry
+    guardian.py erase-verify     --socket S --auth KEY.pub HANDLE --kname K --fingerprint FP --confirm K
+                                 DESTROYS the whole device, then writes an erase-verification report
+    guardian.py device-jobs      --socket S                        progress of running erase-verifications
+    guardian.py device-cancel    --socket S KNAME
+    guardian.py assurance-drives --socket S
+    guardian.py reports          --socket S [--since N]
+    guardian.py report-sign      --socket S --auth KEY.pub HANDLE REPORT_ID
+    guardian.py report-export    --socket S REPORT_ID --out FILE
+    guardian.py report-verify    FILE --trust-log trust.log --trust-anchor trust.anchor   (offline)
+    guardian.py artifacts-sign   --list LIST.json --trust-anchor trust.anchor --auth KEY.pub HANDLE --out FILE
+    guardian.py artifacts-install --socket S FILE
+    guardian.py artifact-verify  --socket S FILE [--name NAME]
+
 Audit ledger:
     guardian.py audit-status     --socket S
     guardian.py audit-verify     --socket S
@@ -444,6 +460,128 @@ def cmd_airlock_discard(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_devices(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        _print(client.call("device.list"))
+    return 0
+
+
+def cmd_assurance_device(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        _print(client.call("assurance.device", {"kname": args.kname}))
+    return 0
+
+
+def cmd_erase_verify(args: argparse.Namespace) -> int:
+    if args.confirm != args.kname:
+        raise ValidationError("--confirm must repeat the device name; this destroys everything on it")
+    with _client(args) as client:
+        report = client.call("assurance.device", {"kname": args.kname})
+        if report["subject"]["fingerprint"] != args.fingerprint:
+            raise ValidationError("device identity differs from --fingerprint; inspect it again")
+        print("Erasing and verifying %s (%d bytes). Touch the YubiKey to start; this destroys all data on it."
+              % (args.kname, report["subject"]["size_bytes"] or 0), file=sys.stderr)
+        _print(call_as_owner(client, _signer(*args.auth), "device.surface_test",
+                             {"kname": args.kname, "fingerprint": args.fingerprint}))
+    return 0
+
+
+def cmd_device_jobs(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        _print(client.call("device.jobs"))
+    return 0
+
+
+def cmd_device_cancel(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        _print(client.call("device.cancel", {"kname": args.kname}))
+    return 0
+
+
+def cmd_assurance_drives(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        _print(client.call("assurance.drives"))
+    return 0
+
+
+def cmd_reports(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        _print(client.call("assurance.reports", {"since": args.since, "limit": 64}))
+    return 0
+
+
+def cmd_report_sign(args: argparse.Namespace) -> int:
+    from usbguardian.identity.sshsig import NS_REPORT
+    signer = _signer(*args.auth)
+    with _client(args) as client:
+        entry = client.call("assurance.report", {"report_id": args.report_id})
+        if entry["ledger_match"] is False:
+            raise ValidationError("this report differs from the audit ledger; not signing it")
+        r = entry["report"]
+        print("Report %s: %s, result %s, subject %s" % (r["report_id"], r["kind"], r["result"],
+                                                        display_text(json.dumps(r["subject"], sort_keys=True), 300)),
+              file=sys.stderr)
+        print("Touch the YubiKey to sign it.", file=sys.stderr)
+        signature = signer.sign_ns(NS_REPORT, bytes.fromhex(entry["digest"]))
+        _print(client.call("assurance.sign", {"report_id": args.report_id, "key_id": signer.key_id,
+                                              "signature": signature.decode("ascii")}))
+    return 0
+
+
+def cmd_report_export(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        entry = client.call("assurance.report", {"report_id": args.report_id})
+    _write_doc(args.out, {"report": entry["report"], "signatures": entry["signatures"]})
+    return 0
+
+
+def cmd_report_verify(args: argparse.Namespace) -> int:
+    from usbguardian.assurance.reports import verify_export
+    from usbguardian.deploy.debian import read_anchor
+    from usbguardian.forge.install import parse_trust_log
+    from usbguardian.identity.sshsig import tool_verify
+    envelopes = parse_trust_log(read_file_bounded(Path(args.trust_log), 8 * 1024 * 1024))
+    _print(verify_export(_read_doc_large(args.file), envelopes, read_anchor(Path(args.trust_anchor)), tool_verify))
+    return 0
+
+
+def _read_doc_large(path: str) -> Any:
+    return canonical_loads(read_file_bounded(Path(path), 1024 * 1024).rstrip(b"\n"), require_canonical=True)
+
+
+def cmd_artifacts_sign(args: argparse.Namespace) -> int:
+    import time as _time
+    from usbguardian.assurance.service import ARTIFACT_LIST_SPEC, artifact_list_digest
+    from usbguardian.deploy.debian import read_anchor
+    from usbguardian.identity.sshsig import NS_ARTIFACTS
+    from usbguardian.runtime import schema as S
+    signer = _signer(*args.auth)
+    entries = json.loads(read_file_bounded(Path(args.list), 4 * 1024 * 1024).decode("utf-8"))
+    doc = S.validate(ARTIFACT_LIST_SPEC, {
+        "format": "guardian-artifact-list", "version": 1, "trust_anchor": read_anchor(Path(args.trust_anchor)),
+        "created": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()), "artifacts": entries})
+    print("Signing a list of %d trusted artifacts. Touch the YubiKey." % len(doc["artifacts"]), file=sys.stderr)
+    signature = signer.sign_ns(NS_ARTIFACTS, artifact_list_digest(doc))
+    _write_doc(args.out, {"list": doc, "key_id": signer.key_id, "signature": signature.decode("ascii")})
+    return 0
+
+
+def cmd_artifacts_install(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        _print(client.call("assurance.artifacts_set", {"envelope": _read_doc_large(args.file)}))
+    return 0
+
+
+def cmd_artifact_verify(args: argparse.Namespace) -> int:
+    fd = _open_ro(args.file)
+    try:
+        with _client(args) as client:
+            _print(client.call("assurance.artifact_verify", {"name": args.name} if args.name else {}, [fd]))
+    finally:
+        os.close(fd)
+    return 0
+
+
 def cmd_watchdog_status(args: argparse.Namespace) -> int:
     with _client(args) as client:
         _print(client.call("watchdog.status"))
@@ -661,6 +799,40 @@ def main(argv: Optional[List[str]] = None) -> int:
     q = command("lease-check", cmd_lease_check, "Main: check a spinoff's request against the registry")
     q.add_argument("--request", required=True)
     q.add_argument("--out")
+    command("devices", cmd_devices, "list block devices with identity and findings")
+    a = command("assurance-device", cmd_assurance_device, "device assurance report")
+    a.add_argument("kname")
+    a = command("erase-verify", cmd_erase_verify, "DESTRUCTIVE: overwrite and verify a whole device (touch)")
+    a.add_argument("--auth", nargs=2, required=True, metavar=("KEY_PUB", "HANDLE"))
+    a.add_argument("--kname", required=True)
+    a.add_argument("--fingerprint", required=True)
+    a.add_argument("--confirm", required=True, help="repeat the device name")
+    command("device-jobs", cmd_device_jobs, "progress of running erase-verifications")
+    a = command("device-cancel", cmd_device_cancel, "stop a running erase-verification early")
+    a.add_argument("kname")
+    command("assurance-drives", cmd_assurance_drives, "drive registry")
+    a = command("reports", cmd_reports, "list assurance reports")
+    a.add_argument("--since", type=int, default=0)
+    a = command("report-sign", cmd_report_sign, "sign a report (touch)")
+    a.add_argument("--auth", nargs=2, required=True, metavar=("KEY_PUB", "HANDLE"))
+    a.add_argument("report_id")
+    a = command("report-export", cmd_report_export, "write a report and its signatures to a file")
+    a.add_argument("report_id")
+    a.add_argument("--out", required=True)
+    a = command("report-verify", cmd_report_verify, "verify an exported report offline", socket=False)
+    a.add_argument("file")
+    a.add_argument("--trust-log", required=True)
+    a.add_argument("--trust-anchor", required=True)
+    a = command("artifacts-sign", cmd_artifacts_sign, "sign a trusted-artifact list (touch)", socket=False)
+    a.add_argument("--list", required=True, help='JSON: [{"name":..,"sha256":..,"size":..,"note":..}]')
+    a.add_argument("--trust-anchor", required=True)
+    a.add_argument("--auth", nargs=2, required=True, metavar=("KEY_PUB", "HANDLE"))
+    a.add_argument("--out", required=True)
+    a = command("artifacts-install", cmd_artifacts_install, "install a signed trusted-artifact list")
+    a.add_argument("file")
+    a = command("artifact-verify", cmd_artifact_verify, "check a file against the trusted-artifact list")
+    a.add_argument("file")
+    a.add_argument("--name")
     a = command("airlock-inspect", cmd_airlock_inspect, "inspect a RED (or GREEN) device")
     a.add_argument("kname")
     a = command("airlock-acquire", cmd_airlock_acquire, "acquire a RED volume into quarantine (touch)")

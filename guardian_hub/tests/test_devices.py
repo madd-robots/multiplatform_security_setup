@@ -485,6 +485,22 @@ class SurfaceOperationTests(unittest.TestCase):
         self.assertEqual(self.opened, (str(self.devdir / "sdb"), "8:16"))
         self.assertFalse(self.untouched())
 
+    def test_result_hook_progress_and_cancel(self):
+        calls, seen = [], []
+        runner = self.runner()
+        runner.on_result = lambda who, before, result, after: calls.append((who, result["passed"])) or {"report_id": "r"}
+        real = runner.jobs.progress
+        runner.jobs.progress = lambda *a: (seen.append(runner.jobs.snapshot()[0]["phase"]), real(*a))
+        out = runner(self.owner(), {"kname": "sdb", "fingerprint": self.fp()})
+        self.assertEqual((out["report_id"], calls), ("r", [("owner", True)]))
+        self.assertIn("seconds", out["result"])
+        self.assertEqual(runner.jobs.snapshot(), [])  # finished jobs disappear
+        self.assertTrue(seen)
+        runner.jobs.should_stop = lambda kname: True  # as if device.cancel had been called
+        out = runner(self.owner(), {"kname": "sdb", "fingerprint": self.fp()})
+        self.assertTrue(out["result"]["cancelled"])
+        self.assertEqual(calls[-1], ("owner", False))
+
     def test_refusals_leave_device_untouched(self):
         fp = self.fp()
         cases = [

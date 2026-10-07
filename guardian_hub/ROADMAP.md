@@ -14,7 +14,7 @@ records where the implementation deviates from it and why.
 | 5 YubiKey integration | enrollment, authentication, owner verification; manifest signer/verifier, revocation (D3); key rotation and locking; broker vault/transfer operations with fd passing | **Done** (`usbguardian/identity`, `vault/operations.py`); hardware validation pending, see notes |
 | 6 Guardian Forge | spinoff creation, deployment packages, signing, registry | **Done** (`usbguardian/forge`); see notes below |
 | 7 Platforms | Debian/MX first, then Termux, then Windows | **Debian/MX done** (`usbguardian/deploy`); Termux and Windows not started, see notes |
-| 8 Device assurance | firmware and artifact verification, erase verification, reports | Audit ledger done (`usbguardian/audit`, handoff H1); reports not started |
+| 8 Device assurance | firmware and artifact verification, erase verification, reports | **Done** (`usbguardian/assurance`, audit ledger in `usbguardian/audit`); see notes |
 | Handoff | leases (D5), watchdog boundary (D8), Airlock (D10), SysVinit preflight and installer v2 (D9, D11), capsules (D7) | **Done in code and tests**; hardware gates open (see "Hardware gates" below) |
 | 9 Final UI | dashboard, managers, forge, audit viewer | Not started |
 
@@ -194,12 +194,45 @@ before anything can rely on it, and none was claimed as done.
   portable: canonical JSON (an RFC 8785 subset), SSHSIG via the
   `ssh-keygen` that ships with Windows, and the package format.
 
-### Next: Stage 8
+### Stage 8 notes
 
-Advanced device assurance: the signed, hash-chained audit ledger (the
-threat model relies on it), firmware and artifact verification reports
-(stating only what the hardware exposes, per D4), and erase-verification
-reports built on the Stage 3 surface test.
+- **Device assurance report** (`assurance.device`): what the device
+  presents (USB, SCSI, MMC), firmware *indicators* (bcdDevice, SCSI
+  revision, MMC fwrev), what cannot be verified (controller firmware,
+  spare flash, behaviour towards other hosts), and inconsistent claims:
+  weak or missing serial, capacity disagreeing with the label, descriptor
+  strings that are not text, link speed, block geometry. Results PASS,
+  REVIEW REQUIRED, BLOCKED. No firmware verification is claimed (design
+  review item 7).
+- **Erase-verification report**: written automatically when
+  `device.surface_test` completes (PASSED, FAILED or CANCELLED), with the
+  full result and a statement of what it proves (logical address space and
+  real capacity) and does not (spare flash, firmware). The surface test now
+  reports progress (`device.jobs`) and can be stopped early
+  (`device.cancel`, no touch: stopping only ends a destructive run sooner).
+- **Drive registry** (D4 step 5): a drive enters it when erase-verification
+  passes. On a later insertion: KNOWN, UNKNOWN, or CHANGED when the same
+  vendor, product and serial now present a different identity (for
+  example a new firmware revision); a changed drive is REJECTED for good.
+  Drives without a usable serial can only be recognised by their full
+  fingerprint.
+- **Reports**: canonical documents whose digest goes into the audit ledger
+  first (a report that cannot be recorded is not created); reading one
+  re-checks it against the ledger. The owner can sign a report
+  (`guardian-report@v1`, one touch, refused if it no longer matches the
+  ledger); `report-verify` checks an exported report offline on any
+  instance against a pinned trust log.
+- **Artifact verification**: an owner-signed list of trusted files (name,
+  SHA-256, size, note; `guardian-artifacts@v1`), re-verified on every use,
+  so a revoked signer invalidates it. A file is VERIFIED only by full hash
+  and size; otherwise MISMATCH or NOT LISTED. A match says the file is the
+  one the owner listed, not that it is safe.
+- **Not done**: D4 steps 3 and 4 for a filesystem layout (new partition
+  table, fresh filesystem, whole-volume inventory) need `mkfs`/`sfdisk`
+  on the MX machine and are left to the hardware round; the raw layout
+  (a signed package at offset 0) already works. Device sanitize commands
+  (SCSI SANITIZE, NVMe format) are not used: USB sticks rarely support
+  them and results cannot be verified from the host.
 
 ### Stage 6 notes
 
