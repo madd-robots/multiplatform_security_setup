@@ -1,0 +1,185 @@
+$ sudo secure-debian-bootstrap --repair-repositories
+# (Ubuntu 24.04 LTS. --no-network is used here only so the example is
+#  reproducible offline; a real repair validates against the archives.)
+
+INFO  secure-debian-bootstrap 1.0.0, run 20260806T183037Z-00005359, mode repair
+INFO  state directory: /var/lib/s3
+
+== preflight ==
+FIND  [medium] world_writable_path_entry: /sbin mode=777
+FIND  [medium] world_writable_path_entry: /bin mode=777
+OK    preflight checks passed
+
+== detection ==
+INFO  Detected platform:     ubuntu
+INFO  Distribution family:   debian
+INFO  Release name:          Ubuntu
+INFO  Release version:       24.04
+INFO  Codename:              noble
+INFO  Pretty name:           Ubuntu 24.04.4 LTS
+INFO  Variant:               none
+INFO  Architecture:          amd64
+INFO  Foreign architectures: none
+INFO  Init system:           unknown
+INFO  Is Termux:             no
+INFO  Running as root:       yes
+INFO  sudo available:        no
+INFO  Package manager:       /usr/bin/apt-get
+INFO  APT config root:       /var/lib/u/etc/apt
+INFO  Keyring directories:   /var/lib/u/etc/apt/trusted.gpg.d /var/lib/u/etc/apt/keyrings /var/lib/u/usr/share/keyrings
+INFO  Write roots:           /var/lib/u/etc/apt /var/lib/u/var/lib/secure-debian-bootstrap /var/lib/s3
+INFO  Confidence:            80%
+INFO  Ambiguous:             no
+INFO  Evidence:
+INFO    - read /var/lib/u/etc/os-release
+INFO    - ID=ubuntu ID_LIKE=debian VERSION_ID=24.04 CODENAME=noble
+INFO    - apt-get=/usr/bin/apt-get
+INFO    - dpkg=/usr/bin/dpkg
+INFO    - arch=amd64 foreign=''
+INFO    - +40 os-release ID=ubuntu
+INFO    - +30 ubuntu-archive-keyring.gpg present
+INFO    - +10 lsb-release DISTRIB_ID=Ubuntu
+INFO    - init=unknown
+INFO    - apt_etc=/var/lib/u/etc/apt
+INFO    - write_roots=/var/lib/u/etc/apt /var/lib/u/var/lib/secure-debian-bootstrap /var/lib/s3
+INFO    - apt_etc=/var/lib/u/etc/apt
+INFO    - write_roots=/var/lib/u/etc/apt /var/lib/u/var/lib/secure-debian-bootstrap /var/lib/s3
+
+== inventory ==
+OK    inventoried 4 paths -> /var/lib/s3/runs/20260806T183037Z-00005359/inventory.tsv
+
+== audit ==
+FIND  [low] repo_plain_http: /var/lib/u/etc/apt/sources.list.d/ubuntu.sources:1 http://archive.ubuntu.com/ubuntu/
+FIND  [low] repo_plain_http: /var/lib/u/etc/apt/sources.list.d/ubuntu.sources:1 http://archive.ubuntu.com/ubuntu/
+FIND  [low] repo_plain_http: /var/lib/u/etc/apt/sources.list.d/ubuntu.sources:7 http://security.ubuntu.com/ubuntu/
+WARN  release status came from the built-in table dated 2026-08-06;
+WARN  install 'distro-info-data' on this host for authoritative dates
+INFO  release status: supported (eol 2029-05-31)
+INFO  findings: 0 high, 2 medium, 3 low
+
+== package trust ==
+FIND  [high] keyring_unowned: /var/lib/u/usr/share/keyrings/ubuntu-archive-keyring.gpg trust anchor is not owned by any installed package (mode=644 owner=root:root)
+INFO  inspected 1 trust anchor(s)
+FIND  [low] apt_key_present: /usr/bin/apt-key apt-key is deprecated; this tool never uses it and neither should new configuration
+OK    dpkg database is consistent
+
+== backup ==
+OK    backup 20260806T183037Z-00005359 created and verified (4 paths)
+
+== quarantine ==
+OK    nothing required quarantine
+
+== rebuild (staging only - the live configuration is untouched) ==
+WARN  release status came from the built-in table dated 2026-08-06;
+WARN  install 'distro-info-data' on this host for authoritative dates
+OK    release status: supported (supported until 2029-05-31)
+OK    template confidence: primary (verified against a vendor source)
+INFO  staged /var/lib/u/etc/apt/sources.list.d/ubuntu.sources
+OK    staged 1 file(s) in /var/lib/s3/runs/20260806T183037Z-00005359/staging
+
+== validate (staged configuration) ==
+WARN  network validation disabled (--no-network); staged configuration was NOT verified against the archives
+OK    staged configuration passed validation
+
+== activate ==
+OK    activated 1 file(s)
+
+== report ==
+secure-debian-bootstrap report
+=============================
+
+run id:      20260806T183037Z-00005359
+mode:        repair
+dry run:     no
+started:     2026-08-06T18:30:36Z
+finished:    2026-08-06T18:30:45Z
+tool:        1.0.0
+
+-- detection --
+Detected platform:     ubuntu
+Distribution family:   debian
+Release name:          Ubuntu
+Release version:       24.04
+Codename:              noble
+Pretty name:           Ubuntu 24.04.4 LTS
+Variant:               none
+Architecture:          amd64
+Foreign architectures: none
+Init system:           unknown
+Is Termux:             no
+Running as root:       yes
+sudo available:        no
+Package manager:       /usr/bin/apt-get
+APT config root:       /var/lib/u/etc/apt
+Keyring directories:   /var/lib/u/etc/apt/trusted.gpg.d /var/lib/u/etc/apt/keyrings /var/lib/u/usr/share/keyrings
+Write roots:           /var/lib/u/etc/apt /var/lib/u/var/lib/secure-debian-bootstrap /var/lib/s3
+Confidence:            80%
+Ambiguous:             no
+Evidence:
+  - read /var/lib/u/etc/os-release
+  - ID=ubuntu ID_LIKE=debian VERSION_ID=24.04 CODENAME=noble
+  - apt-get=/usr/bin/apt-get
+  - dpkg=/usr/bin/dpkg
+  - arch=amd64 foreign=''
+  - +40 os-release ID=ubuntu
+  - +30 ubuntu-archive-keyring.gpg present
+  - +10 lsb-release DISTRIB_ID=Ubuntu
+  - init=unknown
+  - apt_etc=/var/lib/u/etc/apt
+  - write_roots=/var/lib/u/etc/apt /var/lib/u/var/lib/secure-debian-bootstrap /var/lib/s3
+  - apt_etc=/var/lib/u/etc/apt
+  - write_roots=/var/lib/u/etc/apt /var/lib/u/var/lib/secure-debian-bootstrap /var/lib/s3
+
+-- inventory --
+  distro-repo    1
+  keyring        1
+  unknown        2
+  full inventory: /var/lib/s3/runs/20260806T183037Z-00005359/inventory.tsv
+
+-- findings --
+  high:   1
+  medium: 2
+  low:    4
+
+  [medium] world_writable_path_entry    /sbin
+             mode=777
+  [medium] world_writable_path_entry    /bin
+             mode=777
+  [low   ] repo_plain_http              /var/lib/u/etc/apt/sources.list.d/ubuntu.sources:1
+             http://archive.ubuntu.com/ubuntu/
+  [low   ] repo_plain_http              /var/lib/u/etc/apt/sources.list.d/ubuntu.sources:1
+             http://archive.ubuntu.com/ubuntu/
+  [low   ] repo_plain_http              /var/lib/u/etc/apt/sources.list.d/ubuntu.sources:7
+             http://security.ubuntu.com/ubuntu/
+  [high  ] keyring_unowned              /var/lib/u/usr/share/keyrings/ubuntu-archive-keyring.gpg
+             trust anchor is not owned by any installed package (mode=644 owner=root:root)
+  [low   ] apt_key_present              /usr/bin/apt-key
+             apt-key is deprecated; this tool never uses it and neither should new configuration
+
+-- release --
+  status: supported
+  eol:    2029-05-31
+
+-- planned changes --
+  write        /var/lib/u/etc/apt/sources.list.d/ubuntu.sources
+               from template ubuntu/ubuntu.sources
+
+-- applied changes --
+  backup       /var/lib/s3/backups/20260806T183037Z-00005359
+  install      /var/lib/u/etc/apt/sources.list.d/ubuntu.sources
+
+-- artifacts --
+  run directory: /var/lib/s3/runs/20260806T183037Z-00005359
+  log:           /var/lib/s3/runs/20260806T183037Z-00005359/run.log
+  events:        /var/lib/s3/runs/20260806T183037Z-00005359/events.jsonl
+  backup:        /var/lib/s3/backups/20260806T183037Z-00005359
+  quarantine:    /var/lib/s3/quarantine/20260806T183037Z-00005359
+  staging:       /var/lib/s3/runs/20260806T183037Z-00005359/staging
+
+-- how to undo this run --
+  secure-debian-bootstrap --rollback 20260806T183037Z-00005359
+  (preview first with: secure-debian-bootstrap --rollback 20260806T183037Z-00005359 --dry-run)
+  quarantined files were preserved; each was renamed with the suffix .sdb-quarantined
+
+INFO  report:      /var/lib/s3/runs/20260806T183037Z-00005359/report.txt
+INFO  report json: /var/lib/s3/runs/20260806T183037Z-00005359/report.json

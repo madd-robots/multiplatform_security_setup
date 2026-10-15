@@ -1,0 +1,6 @@
+# Termux main repository.
+# Source: termux/termux-packages wiki "Mirrors" (primary host), retrieved 2026-08-06.
+# Signature verification uses the keys installed by the termux-keyring package
+# into $PREFIX/etc/apt/trusted.gpg.d/ - do not add Signed-By here, Termux does
+# not use it.
+deb https://packages.termux.dev/apt/termux-main stable main

@@ -1,0 +1,13 @@
+# Parrot OS official repositories.
+# Reproduced from the upstream parrot-core repository file, 2026-08-06.
+
+# Main repository.
+deb https://deb.parrot.sh/parrot @PARROT_SUITE@ main contrib non-free non-free-firmware
+
+# Security updates. Upstream states these must come from the official domain or
+# CDN and not from mirrors - hence the /direct/ path. Keep this enabled.
+deb https://deb.parrot.sh/direct/parrot @PARROT_SUITE@-security main contrib non-free non-free-firmware
+
+# Backports. Disabled by this tool's baseline (stability over newer features).
+# Enable deliberately if you need it.
+@BACKPORTS_COMMENT@deb https://deb.parrot.sh/parrot @PARROT_SUITE@-backports main contrib non-free non-free-firmware

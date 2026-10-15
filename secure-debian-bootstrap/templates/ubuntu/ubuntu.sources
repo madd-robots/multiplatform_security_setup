@@ -1,0 +1,14 @@
+# Ubuntu distribution repositories.
+# Structure verbatim from a shipping Ubuntu installation, 2026-08-06.
+Types: deb
+URIs: http://archive.ubuntu.com/ubuntu/
+Suites: @CODENAME@ @CODENAME@-updates@BACKPORTS_SUITE@
+Components: @COMPONENTS@
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+# Ubuntu security updates. Mirrors the choices above except URI and suite.
+Types: deb
+URIs: http://security.ubuntu.com/ubuntu/
+Suites: @CODENAME@-security
+Components: @COMPONENTS@
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg

@@ -1,0 +1,129 @@
+$ sudo secure-debian-bootstrap --rollback 20260806T183055Z-00005a5b
+# Undoing the repair shown in 03-repair-success-ubuntu.txt.
+
+INFO  secure-debian-bootstrap 1.0.0, run 20260806T183125Z-00006a4c, mode rollback
+INFO  state directory: /var/lib/s
+
+== preflight ==
+FIND  [medium] world_writable_path_entry: /sbin mode=777
+FIND  [medium] world_writable_path_entry: /bin mode=777
+OK    preflight checks passed
+
+== detection ==
+INFO  Detected platform:     ubuntu
+INFO  Distribution family:   debian
+INFO  Release name:          Ubuntu
+INFO  Release version:       24.04
+INFO  Codename:              noble
+INFO  Pretty name:           Ubuntu 24.04.4 LTS
+INFO  Variant:               none
+INFO  Architecture:          amd64
+INFO  Foreign architectures: none
+INFO  Init system:           unknown
+INFO  Is Termux:             no
+INFO  Running as root:       yes
+INFO  sudo available:        no
+INFO  Package manager:       /usr/bin/apt-get
+INFO  APT config root:       /var/lib/u/etc/apt
+INFO  Keyring directories:   /var/lib/u/etc/apt/trusted.gpg.d /var/lib/u/etc/apt/keyrings /var/lib/u/usr/share/keyrings
+INFO  Write roots:           /var/lib/u/etc/apt /var/lib/u/var/lib/secure-debian-bootstrap /var/lib/s
+INFO  Confidence:            80%
+INFO  Ambiguous:             no
+INFO  Evidence:
+INFO    - read /var/lib/u/etc/os-release
+INFO    - ID=ubuntu ID_LIKE=debian VERSION_ID=24.04 CODENAME=noble
+INFO    - apt-get=/usr/bin/apt-get
+INFO    - dpkg=/usr/bin/dpkg
+INFO    - arch=amd64 foreign=''
+INFO    - +40 os-release ID=ubuntu
+INFO    - +30 ubuntu-archive-keyring.gpg present
+INFO    - +10 lsb-release DISTRIB_ID=Ubuntu
+INFO    - init=unknown
+INFO    - apt_etc=/var/lib/u/etc/apt
+INFO    - write_roots=/var/lib/u/etc/apt /var/lib/u/var/lib/secure-debian-bootstrap /var/lib/s
+INFO    - apt_etc=/var/lib/u/etc/apt
+INFO    - write_roots=/var/lib/u/etc/apt /var/lib/u/var/lib/secure-debian-bootstrap /var/lib/s
+
+== rollback 20260806T183117Z-000064aa ==
+INFO  backup identity: platform=ubuntu os=ubuntu codename=noble
+INFO  this system:     platform=ubuntu os=ubuntu codename=noble
+WARN  skipping /var/lib/u/usr/share/keyrings: outside this platform's write roots
+WARN  skipping /var/lib/u/usr/share/keyrings/ubuntu-archive-keyring.gpg: outside this platform's write roots
+INFO  rollback report: /var/lib/s/runs/20260806T183125Z-00006a4c/rollback-report.txt
+WARN  rollback finished with 2 skipped entr(ies)
+OK    rollback restored 2 path(s) from backup 20260806T183117Z-000064aa
+
+== report ==
+secure-debian-bootstrap report
+=============================
+
+run id:      20260806T183125Z-00006a4c
+mode:        rollback
+dry run:     no
+started:     2026-08-06T18:31:25Z
+finished:    2026-08-06T18:31:26Z
+tool:        1.0.0
+
+-- detection --
+Detected platform:     ubuntu
+Distribution family:   debian
+Release name:          Ubuntu
+Release version:       24.04
+Codename:              noble
+Pretty name:           Ubuntu 24.04.4 LTS
+Variant:               none
+Architecture:          amd64
+Foreign architectures: none
+Init system:           unknown
+Is Termux:             no
+Running as root:       yes
+sudo available:        no
+Package manager:       /usr/bin/apt-get
+APT config root:       /var/lib/u/etc/apt
+Keyring directories:   /var/lib/u/etc/apt/trusted.gpg.d /var/lib/u/etc/apt/keyrings /var/lib/u/usr/share/keyrings
+Write roots:           /var/lib/u/etc/apt /var/lib/u/var/lib/secure-debian-bootstrap /var/lib/s
+Confidence:            80%
+Ambiguous:             no
+Evidence:
+  - read /var/lib/u/etc/os-release
+  - ID=ubuntu ID_LIKE=debian VERSION_ID=24.04 CODENAME=noble
+  - apt-get=/usr/bin/apt-get
+  - dpkg=/usr/bin/dpkg
+  - arch=amd64 foreign=''
+  - +40 os-release ID=ubuntu
+  - +30 ubuntu-archive-keyring.gpg present
+  - +10 lsb-release DISTRIB_ID=Ubuntu
+  - init=unknown
+  - apt_etc=/var/lib/u/etc/apt
+  - write_roots=/var/lib/u/etc/apt /var/lib/u/var/lib/secure-debian-bootstrap /var/lib/s
+  - apt_etc=/var/lib/u/etc/apt
+  - write_roots=/var/lib/u/etc/apt /var/lib/u/var/lib/secure-debian-bootstrap /var/lib/s
+
+-- findings --
+  high:   0
+  medium: 2
+  low:    0
+
+  [medium] world_writable_path_entry    /sbin
+             mode=777
+  [medium] world_writable_path_entry    /bin
+             mode=777
+
+-- release --
+  status: unknown
+
+-- applied changes --
+  restore      /var/lib/u/etc/apt/sources.list.d
+  restore      /var/lib/u/etc/apt/sources.list.d/ubuntu.sources
+
+-- artifacts --
+  run directory: /var/lib/s/runs/20260806T183125Z-00006a4c
+  log:           /var/lib/s/runs/20260806T183125Z-00006a4c/run.log
+  events:        /var/lib/s/runs/20260806T183125Z-00006a4c/events.jsonl
+  staging:       /var/lib/s/runs/20260806T183125Z-00006a4c/staging
+
+-- how to undo this run --
+  no backup was taken (no modifying stage ran)
+
+INFO  report:      /var/lib/s/runs/20260806T183125Z-00006a4c/report.txt
+INFO  report json: /var/lib/s/runs/20260806T183125Z-00006a4c/report.json

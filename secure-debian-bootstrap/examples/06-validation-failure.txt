@@ -1,0 +1,90 @@
+$ sudo secure-debian-bootstrap --repair-repositories
+# Kali whose archive keyring has been left group/world-writable - anyone
+# local could replace the trust anchor. The rebuilt configuration is staged
+# and validated, validation fails, and NOTHING is activated.
+
+INFO  secure-debian-bootstrap 1.0.0, run 20260806T183215Z-000077f0, mode repair
+INFO  state directory: /var/lib/s5
+
+== preflight ==
+FIND  [medium] world_writable_path_entry: /sbin mode=777
+FIND  [medium] world_writable_path_entry: /bin mode=777
+OK    preflight checks passed
+
+== detection ==
+INFO  Detected platform:     kali
+INFO  Distribution family:   debian
+INFO  Release name:          Kali GNU/Linux
+INFO  Release version:       2026.2
+INFO  Codename:              unknown
+INFO  Pretty name:           Kali GNU/Linux Purple Rolling
+INFO  Variant:               purple
+INFO  Architecture:          amd64
+INFO  Foreign architectures: none
+INFO  Init system:           unknown
+INFO  Is Termux:             no
+INFO  Running as root:       yes
+INFO  sudo available:        no
+INFO  Package manager:       /usr/bin/apt-get
+INFO  APT config root:       /var/lib/k/etc/apt
+INFO  Keyring directories:   /var/lib/k/etc/apt/trusted.gpg.d /var/lib/k/etc/apt/keyrings /var/lib/k/usr/share/keyrings
+INFO  Write roots:           /var/lib/k/etc/apt /var/lib/k/var/lib/secure-debian-bootstrap /var/lib/s5
+INFO  Confidence:            75%
+INFO  Ambiguous:             no
+INFO  Evidence:
+INFO    - read /var/lib/k/etc/os-release
+INFO    - ID=kali ID_LIKE=debian VERSION_ID=2026.2 CODENAME=
+INFO    - apt-get=/usr/bin/apt-get
+INFO    - dpkg=/usr/bin/dpkg
+INFO    - arch=amd64 foreign=''
+INFO    - +40 os-release ID=kali
+INFO    - +25 kali-archive-keyring.gpg present
+INFO    - +10 kali.sources present
+INFO    - Kali variant=purple (treated as Kali, not a separate distribution)
+INFO    - init=unknown
+INFO    - apt_etc=/var/lib/k/etc/apt
+INFO    - write_roots=/var/lib/k/etc/apt /var/lib/k/var/lib/secure-debian-bootstrap /var/lib/s5
+INFO    - apt_etc=/var/lib/k/etc/apt
+INFO    - write_roots=/var/lib/k/etc/apt /var/lib/k/var/lib/secure-debian-bootstrap /var/lib/s5
+INFO  Kali Purple detected; treated as Kali (no branch or distribution change will be made)
+
+== inventory ==
+OK    inventoried 4 paths -> /var/lib/s5/runs/20260806T183215Z-000077f0/inventory.tsv
+
+== audit ==
+FIND  [low] repo_plain_http: /var/lib/k/etc/apt/sources.list.d/kali.sources:1 http://http.kali.org/kali/
+INFO  release status: rolling
+INFO  findings: 0 high, 2 medium, 1 low
+
+== package trust ==
+FIND  [high] keyring_unowned: /var/lib/k/usr/share/keyrings/kali-archive-keyring.gpg trust anchor is not owned by any installed package (mode=666 owner=root:root)
+FIND  [high] keyring_writable: /var/lib/k/usr/share/keyrings/kali-archive-keyring.gpg trust anchor is group/world-writable (mode=666)
+INFO  inspected 1 trust anchor(s)
+FIND  [low] apt_key_present: /usr/bin/apt-key apt-key is deprecated; this tool never uses it and neither should new configuration
+OK    dpkg database is consistent
+
+== backup ==
+OK    backup 20260806T183215Z-000077f0 created and verified (4 paths)
+
+== quarantine ==
+OK    nothing required quarantine
+
+== rebuild (staging only - the live configuration is untouched) ==
+OK    release status: rolling
+OK    template confidence: primary (verified against a vendor source)
+INFO  staged /var/lib/k/etc/apt/sources.list.d/kali.sources
+OK    staged 1 file(s) in /var/lib/s5/runs/20260806T183215Z-000077f0/staging
+
+== validate (staged configuration) ==
+ERROR validation: /var/lib/k/etc/apt/sources.list.d/kali.sources: keyring /usr/share/keyrings/kali-archive-keyring.gpg is group/world-writable (mode 666)
+WARN  network validation disabled (--no-network); staged configuration was NOT verified against the archives
+ERROR staged configuration failed validation with 1 failure(s)
+ERROR NOTHING was activated. The live configuration is unchanged.
+ERROR staged files kept for inspection: /var/lib/s5/runs/20260806T183215Z-000077f0/staging
+ERROR validation transcript:            /var/lib/s5/runs/20260806T183215Z-000077f0/validation.txt
+ERROR staged configuration failed validation; nothing was activated and the live configuration is unchanged
+
+$ echo "exit code: $?"   -> 6 (staged validation failed; live configuration untouched)
+
+# The live configuration is byte-identical to before the run, the staged
+# files are kept for inspection, and the backup remains available.

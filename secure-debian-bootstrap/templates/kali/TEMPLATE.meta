@@ -1,0 +1,13 @@
+platform=kali
+confidence=primary
+source=kalilinux/documentation/kali-docs general-use/kali-apt-sources/index.md
+source_url=https://gitlab.com/kalilinux/documentation/kali-docs/-/raw/master/general-use/kali-apt-sources/index.md
+retrieved=2026-08-06
+format=deb822
+target=sources.list.d/kali.sources
+legacy_target=sources.list
+official_hosts=http.kali.org kali.download archive.kali.org
+keyring_model=Signed-By /usr/share/keyrings/kali-archive-keyring.gpg
+notes=deb822 kali.sources is the default from Kali 2026.2 onward; before that the
+notes=one-line form in sources.list is correct. Branch (kali-rolling or
+notes=kali-last-snapshot) is preserved from the system, never switched.

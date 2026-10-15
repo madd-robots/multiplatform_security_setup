@@ -1,0 +1,173 @@
+$ secure-debian-bootstrap --repair-repositories --dry-run
+# (Kali Purple 2026.2 on the kali-last-snapshot branch)
+
+INFO  secure-debian-bootstrap 1.0.0, run 20260806T183029Z-00004f02, mode repair (dry run)
+INFO  state directory: /var/lib/s2
+
+== preflight ==
+FIND  [medium] world_writable_path_entry: /sbin mode=777
+FIND  [medium] world_writable_path_entry: /bin mode=777
+OK    preflight checks passed
+
+== detection ==
+INFO  Detected platform:     kali
+INFO  Distribution family:   debian
+INFO  Release name:          Kali GNU/Linux
+INFO  Release version:       2026.2
+INFO  Codename:              unknown
+INFO  Pretty name:           Kali GNU/Linux Purple Rolling
+INFO  Variant:               purple
+INFO  Architecture:          amd64
+INFO  Foreign architectures: none
+INFO  Init system:           unknown
+INFO  Is Termux:             no
+INFO  Running as root:       yes
+INFO  sudo available:        no
+INFO  Package manager:       /usr/bin/apt-get
+INFO  APT config root:       /var/lib/k/etc/apt
+INFO  Keyring directories:   /var/lib/k/etc/apt/trusted.gpg.d /var/lib/k/etc/apt/keyrings /var/lib/k/usr/share/keyrings
+INFO  Write roots:           /var/lib/k/etc/apt /var/lib/k/var/lib/secure-debian-bootstrap /var/lib/s2
+INFO  Confidence:            75%
+INFO  Ambiguous:             no
+INFO  Evidence:
+INFO    - read /var/lib/k/etc/os-release
+INFO    - ID=kali ID_LIKE=debian VERSION_ID=2026.2 CODENAME=
+INFO    - apt-get=/usr/bin/apt-get
+INFO    - dpkg=/usr/bin/dpkg
+INFO    - arch=amd64 foreign=''
+INFO    - +40 os-release ID=kali
+INFO    - +25 kali-archive-keyring.gpg present
+INFO    - +10 kali.sources present
+INFO    - Kali variant=purple (treated as Kali, not a separate distribution)
+INFO    - init=unknown
+INFO    - apt_etc=/var/lib/k/etc/apt
+INFO    - write_roots=/var/lib/k/etc/apt /var/lib/k/var/lib/secure-debian-bootstrap /var/lib/s2
+INFO    - apt_etc=/var/lib/k/etc/apt
+INFO    - write_roots=/var/lib/k/etc/apt /var/lib/k/var/lib/secure-debian-bootstrap /var/lib/s2
+INFO  Kali Purple detected; treated as Kali (no branch or distribution change will be made)
+
+== inventory ==
+OK    inventoried 4 paths -> /var/lib/s2/runs/20260806T183029Z-00004f02/inventory.tsv
+
+== audit ==
+FIND  [low] repo_plain_http: /var/lib/k/etc/apt/sources.list.d/kali.sources:1 http://http.kali.org/kali/
+INFO  release status: rolling
+INFO  findings: 0 high, 2 medium, 1 low
+
+== package trust ==
+FIND  [high] keyring_unowned: /var/lib/k/usr/share/keyrings/kali-archive-keyring.gpg trust anchor is not owned by any installed package (mode=644 owner=root:root)
+INFO  inspected 1 trust anchor(s)
+FIND  [low] apt_key_present: /usr/bin/apt-key apt-key is deprecated; this tool never uses it and neither should new configuration
+OK    dpkg database is consistent
+
+== backup ==
+INFO  [dry-run] would create backup 20260806T183029Z-00004f02
+
+== quarantine ==
+OK    nothing required quarantine
+
+== rebuild (staging only - the live configuration is untouched) ==
+OK    release status: rolling
+OK    template confidence: primary (verified against a vendor source)
+INFO  staged /var/lib/k/etc/apt/sources.list.d/kali.sources
+OK    staged 1 file(s) in /var/lib/s2/runs/20260806T183029Z-00004f02/staging
+
+== validate (staged configuration) ==
+WARN  network validation disabled (--no-network); staged configuration was NOT verified against the archives
+OK    staged configuration passed validation
+
+== activate ==
+INFO  [dry-run] would install /var/lib/k/etc/apt/sources.list.d/kali.sources
+
+== report ==
+secure-debian-bootstrap report
+=============================
+
+run id:      20260806T183029Z-00004f02
+mode:        repair
+dry run:     yes
+started:     2026-08-06T18:30:29Z
+finished:    2026-08-06T18:30:36Z
+tool:        1.0.0
+
+-- detection --
+Detected platform:     kali
+Distribution family:   debian
+Release name:          Kali GNU/Linux
+Release version:       2026.2
+Codename:              unknown
+Pretty name:           Kali GNU/Linux Purple Rolling
+Variant:               purple
+Architecture:          amd64
+Foreign architectures: none
+Init system:           unknown
+Is Termux:             no
+Running as root:       yes
+sudo available:        no
+Package manager:       /usr/bin/apt-get
+APT config root:       /var/lib/k/etc/apt
+Keyring directories:   /var/lib/k/etc/apt/trusted.gpg.d /var/lib/k/etc/apt/keyrings /var/lib/k/usr/share/keyrings
+Write roots:           /var/lib/k/etc/apt /var/lib/k/var/lib/secure-debian-bootstrap /var/lib/s2
+Confidence:            75%
+Ambiguous:             no
+Evidence:
+  - read /var/lib/k/etc/os-release
+  - ID=kali ID_LIKE=debian VERSION_ID=2026.2 CODENAME=
+  - apt-get=/usr/bin/apt-get
+  - dpkg=/usr/bin/dpkg
+  - arch=amd64 foreign=''
+  - +40 os-release ID=kali
+  - +25 kali-archive-keyring.gpg present
+  - +10 kali.sources present
+  - Kali variant=purple (treated as Kali, not a separate distribution)
+  - init=unknown
+  - apt_etc=/var/lib/k/etc/apt
+  - write_roots=/var/lib/k/etc/apt /var/lib/k/var/lib/secure-debian-bootstrap /var/lib/s2
+  - apt_etc=/var/lib/k/etc/apt
+  - write_roots=/var/lib/k/etc/apt /var/lib/k/var/lib/secure-debian-bootstrap /var/lib/s2
+
+-- inventory --
+  distro-repo    1
+  keyring        1
+  unknown        2
+  full inventory: /var/lib/s2/runs/20260806T183029Z-00004f02/inventory.tsv
+
+-- findings --
+  high:   1
+  medium: 2
+  low:    2
+
+  [medium] world_writable_path_entry    /sbin
+             mode=777
+  [medium] world_writable_path_entry    /bin
+             mode=777
+  [low   ] repo_plain_http              /var/lib/k/etc/apt/sources.list.d/kali.sources:1
+             http://http.kali.org/kali/
+  [high  ] keyring_unowned              /var/lib/k/usr/share/keyrings/kali-archive-keyring.gpg
+             trust anchor is not owned by any installed package (mode=644 owner=root:root)
+  [low   ] apt_key_present              /usr/bin/apt-key
+             apt-key is deprecated; this tool never uses it and neither should new configuration
+
+-- release --
+  status: rolling
+
+-- planned changes --
+  backup       /var/lib/s2/backups/20260806T183029Z-00004f02
+               archive APT configuration from /var/lib/k/etc/apt
+  write        /var/lib/k/etc/apt/sources.list.d/kali.sources
+               from template kali/kali.sources
+
+-- artifacts --
+  run directory: /var/lib/s2/runs/20260806T183029Z-00004f02
+  log:           /var/lib/s2/runs/20260806T183029Z-00004f02/run.log
+  events:        /var/lib/s2/runs/20260806T183029Z-00004f02/events.jsonl
+  backup:        /var/lib/s2/backups/20260806T183029Z-00004f02
+  staging:       /var/lib/s2/runs/20260806T183029Z-00004f02/staging
+
+-- how to undo this run --
+  secure-debian-bootstrap --rollback 20260806T183029Z-00004f02
+  (preview first with: secure-debian-bootstrap --rollback 20260806T183029Z-00004f02 --dry-run)
+
+INFO  report:      /var/lib/s2/runs/20260806T183029Z-00004f02/report.txt
+INFO  report json: /var/lib/s2/runs/20260806T183029Z-00004f02/report.json
+OK    dry run complete: 2 planned change(s), 0 applied

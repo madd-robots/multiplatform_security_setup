@@ -1,0 +1,15 @@
+platform=mx-linux
+confidence=secondary
+source=Search summaries of the official MX-25 repos wiki page; mxlinux.org and
+source=mxrepo.com were denied by this build environment's egress policy.
+source_url=blocked: https://mxlinux.org/wiki/system/repos-mx-25/
+retrieved=2026-08-06
+format=legacy
+target=sources.list.d/mx.list sources.list.d/debian.list sources.list.d/debian-stable-updates.list
+official_hosts=mxrepo.com deb.debian.org security.debian.org
+keyring_model=vendor keyring in trusted.gpg.d; not rewritten by this tool
+notes=CONFIDENCE IS SECONDARY. Requires --allow-secondary-template.
+notes=MX legitimately combines MX repositories with Debian stable repositories -
+notes=that combination is expected here and must not be "cleaned up".
+notes=The MX mirror host discovered on the system is preserved; the host below
+notes=is a fallback only. Init may be SysVinit or systemd (MX 25.1 ships both).
